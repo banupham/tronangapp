@@ -199,6 +199,17 @@ def image_put_command(parts):
     )
 
 
+def tap_workflow(parts):
+    if len(parts) != 3:
+        raise ValueError("usage: /tap X Y")
+    _, raw_x, raw_y = parts
+    x = int(raw_x)
+    y = int(raw_y)
+    if x < 0 or y < 0:
+        raise ValueError("X and Y must be non-negative")
+    return f"TAP:{x},{y}"
+
+
 def split_console_line(line: str):
     # posix=False preserves Windows backslashes such as C:\\temp\\claim.png.
     parts = shlex.split(line, posix=False)
@@ -207,7 +218,8 @@ def split_console_line(line: str):
 
 async def console():
     print("Commands:")
-    print("  raw workflow, e.g. UP or WAIT:OK;CLICK:OK;BACK;SLEEP:0.2;HOME")
+    print("  raw workflow, e.g. UP or WAIT:OK;CLICK:OK;TAP:504,1513;BACK;SLEEP:0.2;HOME")
+    print("  /tap X Y          -> TAP:X,Y")
     print("  /img NAME FILE LEFT TOP RIGHT BOTTOM [THRESHOLD]")
     print("  /find NAME        -> WAIT_IMG:NAME")
     print("  /clickimg NAME    -> CLICK_IMG:NAME")
@@ -233,6 +245,8 @@ async def console():
         try:
             if line.startswith("/img "):
                 await broadcast(image_put_command(split_console_line(line)))
+            elif line.startswith("/tap "):
+                await send_workflow(tap_workflow(split_console_line(line)))
             elif line.startswith("/find "):
                 name = line[len("/find "):].strip()
                 await send_workflow(f"WAIT_IMG:{name}")
