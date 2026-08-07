@@ -4,11 +4,16 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import java.util.Locale
+import org.json.JSONObject
+import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.NodeSnapshot
+import vn.banupham.tronangapp.runtime.WorkflowEngine
+import vn.banupham.tronangapp.runtime.WorkflowStatus
 
 class GenericAccessibilityService : AccessibilityService() {
     private data class ClickCandidate(
@@ -16,24 +21,55 @@ class GenericAccessibilityService : AccessibilityService() {
         val priority: Int
     )
 
+    private data class IndexedNode(
+        val node: AccessibilityNodeInfo,
+        val fieldPriority: Int
+    )
+
     private var generation = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var liveNodeIndex: Map<String, List<IndexedNode>> = emptyMap()
+
+    private val remoteSocket by lazy {
+        RemoteSocketClient(this, ::handleRemoteCommand)
+    }
+
+    private val workflowEngine by lazy {
+        WorkflowEngine(this) { status ->
+            remoteSocket.send(workflowStatusJson(status))
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        remoteSocket.connectSaved()
         refreshSnapshot("service_connected")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val label = event?.let { AccessibilityEvent.eventTypeToString(it.eventType) }
-        refreshSnapshot(label)
+        if (refreshSnapshot(label)) {
+            workflowEngine.onTreeUpdated()
+        }
     }
 
     private fun refreshSnapshot(lastEvent: String?): Boolean {
         val root = rootInActiveWindow ?: return false
         val activePackage = root.packageName?.toString()
         val output = ArrayList<NodeSnapshot>()
-        collectNode(root, parentKey = null, key = "0", output = output, depth = 0)
+        val newIndex = HashMap<String, MutableList<IndexedNode>>()
+        collectNode(
+            node = root,
+            parentKey = null,
+            key = "0",
+            output = output,
+            index = newIndex,
+            depth = 0
+        )
+        liveNodeIndex = newIndex.mapValues { it.value.toList() }
         AgentRuntime.update(
             packageName = activePackage,
             newNodes = output,
@@ -48,6 +84,7 @@ class GenericAccessibilityService : AccessibilityService() {
         parentKey: String?,
         key: String,
         output: MutableList<NodeSnapshot>,
+        index: MutableMap<String, MutableList<IndexedNode>>,
         depth: Int
     ) {
         if (depth > MAX_DEPTH || output.size >= MAX_NODES) return
@@ -64,25 +101,57 @@ class GenericAccessibilityService : AccessibilityService() {
                 top = bounds.top,
                 right = bounds.right,
                 bottom = bounds.bottom,
+                enabled = node.isEnabled,
                 clickable = node.isClickable,
                 parentKey = parentKey
             )
+
+            addToIndex(index, node.text?.toString(), node, fieldPriority = 0)
+            addToIndex(index, node.contentDescription?.toString(), node, fieldPriority = 1)
         }
 
-        for (index in 0 until node.childCount) {
+        for (childIndex in 0 until node.childCount) {
             if (output.size >= MAX_NODES) break
-            val child = node.getChild(index) ?: continue
+            val child = node.getChild(childIndex) ?: continue
             collectNode(
                 node = child,
                 parentKey = key,
-                key = "$key.$index",
+                key = "$key.$childIndex",
                 output = output,
+                index = index,
                 depth = depth + 1
             )
         }
     }
 
-    fun swipe(direction: String): Boolean {
+    private fun addToIndex(
+        index: MutableMap<String, MutableList<IndexedNode>>,
+        rawValue: String?,
+        node: AccessibilityNodeInfo,
+        fieldPriority: Int
+    ) {
+        val normalized = AgentRuntime.normalizeForMatch(rawValue.orEmpty())
+        if (normalized.isBlank()) return
+        index.getOrPut(normalized) { ArrayList() }
+            .add(IndexedNode(node, fieldPriority))
+    }
+
+    fun swipe(direction: String): Boolean = dispatchSwipe(direction, callback = null)
+
+    fun swipeForWorkflow(direction: String, onComplete: (Boolean) -> Unit): Boolean {
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                onComplete(true)
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                onComplete(false)
+            }
+        }
+        return dispatchSwipe(direction, callback)
+    }
+
+    private fun dispatchSwipe(direction: String, callback: GestureResultCallback?): Boolean {
         val upward = direction.equals("up", ignoreCase = true)
         val downward = direction.equals("down", ignoreCase = true)
         if (!upward && !downward) return false
@@ -100,28 +169,97 @@ class GenericAccessibilityService : AccessibilityService() {
             GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0, SWIPE_DURATION_MS))
                 .build(),
-            null,
+            callback,
             null
         )
     }
 
     fun clickText(requestedText: String): Boolean {
-        val expected = normalizeForMatch(requestedText)
+        val expected = AgentRuntime.normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
+        // Fast path: use the node index that was built when the latest
+        // Accessibility event refreshed the tree. This avoids another full
+        // traversal for the common case.
+        if (clickFromLiveIndex(expected)) return true
+
+        // Fallback: rebuild candidates from the current root in case the
+        // indexed AccessibilityNodeInfo became stale between events.
         val root = rootInActiveWindow ?: return false
         val candidates = ArrayList<ClickCandidate>()
         collectClickCandidates(root, expected, candidates, depth = 0)
-
-        // Exact text/description is preferred. If there is no exact match,
-        // a node containing the requested phrase is allowed. Matching ignores
-        // case and every kind of whitespace, including line breaks and NBSP.
         for (candidate in candidates.sortedBy { it.priority }) {
             val target = clickableNode(candidate.node) ?: continue
             if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
         }
         return false
     }
+
+    private fun clickFromLiveIndex(expected: String): Boolean {
+        val snapshot = liveNodeIndex
+        val exact = snapshot[expected].orEmpty().sortedBy { it.fieldPriority }
+        for (candidate in exact) {
+            val target = clickableNode(candidate.node) ?: continue
+            if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+
+        val contains = snapshot.asSequence()
+            .filter { (value, _) -> value.contains(expected) }
+            .flatMap { (_, nodes) -> nodes.asSequence() }
+            .sortedBy { it.fieldPriority }
+        for (candidate in contains) {
+            val target = clickableNode(candidate.node) ?: continue
+            if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+        return false
+    }
+
+    fun isTargetReady(requestedText: String): Boolean = AgentRuntime.isReadyTarget(requestedText)
+
+    fun runWorkflow(script: String): WorkflowStatus = workflowEngine.start(script)
+
+    fun stopWorkflow(): WorkflowStatus = workflowEngine.stop()
+
+    fun workflowStatus(): WorkflowStatus = workflowEngine.status
+
+    fun connectSocket(url: String): Boolean = remoteSocket.connect(url, persist = true)
+
+    fun disconnectSocket(clearSavedUrl: Boolean = true) {
+        remoteSocket.disconnect(clearSavedUrl)
+    }
+
+    fun socketState(): String = remoteSocket.state
+
+    fun socketUrl(): String? = remoteSocket.url
+
+    private fun handleRemoteCommand(rawCommand: String) {
+        mainHandler.post {
+            val command = rawCommand.trim()
+            when {
+                command.equals("PING", ignoreCase = true) -> {
+                    remoteSocket.send("{\"type\":\"pong\"}")
+                }
+
+                command.equals("STOP", ignoreCase = true) -> {
+                    stopWorkflow()
+                }
+
+                command.isNotEmpty() -> {
+                    runWorkflow(command)
+                }
+            }
+        }
+    }
+
+    private fun workflowStatusJson(status: WorkflowStatus): String = JSONObject().apply {
+        put("type", "workflow")
+        put("state", status.state)
+        put("step", status.stepIndex)
+        put("total", status.stepCount)
+        put("command", status.command ?: JSONObject.NULL)
+        put("target", status.target ?: JSONObject.NULL)
+        put("error", status.error ?: JSONObject.NULL)
+    }.toString()
 
     private fun collectClickCandidates(
         node: AccessibilityNodeInfo,
@@ -132,8 +270,8 @@ class GenericAccessibilityService : AccessibilityService() {
         if (depth > MAX_DEPTH || output.size >= MAX_CLICK_CANDIDATES) return
 
         if (node.isVisibleToUser) {
-            val text = normalizeForMatch(node.text?.toString().orEmpty())
-            val description = normalizeForMatch(node.contentDescription?.toString().orEmpty())
+            val text = AgentRuntime.normalizeForMatch(node.text?.toString().orEmpty())
+            val description = AgentRuntime.normalizeForMatch(node.contentDescription?.toString().orEmpty())
             val priority = when {
                 text.isNotBlank() && text == expected -> 0
                 description.isNotBlank() && description == expected -> 1
@@ -160,21 +298,13 @@ class GenericAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun normalizeForMatch(value: String): String = value
-        .lowercase(Locale.ROOT)
-        .filterNot { ch ->
-            ch.isWhitespace() ||
-                Character.isSpaceChar(ch) ||
-                ch == '\u200B' ||
-                ch == '\uFEFF'
-        }
-
     override fun onInterrupt() {
         AgentRuntime.disconnect()
     }
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        remoteSocket.disconnect(clearSavedUrl = false)
         AgentRuntime.disconnect()
         super.onDestroy()
     }
