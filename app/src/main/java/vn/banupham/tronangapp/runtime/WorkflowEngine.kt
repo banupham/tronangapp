@@ -1,5 +1,6 @@
 package vn.banupham.tronangapp.runtime
 
+import android.view.accessibility.AccessibilityNodeInfo
 import java.util.Locale
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
@@ -23,7 +24,8 @@ data class WorkflowStatus(
     val stepCount: Int = 0,
     val command: String? = null,
     val target: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    val requestId: String? = null
 )
 
 class WorkflowEngine(
@@ -38,34 +40,44 @@ class WorkflowEngine(
     private var index = 0
     private var actionInFlight = false
     private var executionId = 0L
+    private var currentRequestId: String? = null
 
     @Synchronized
-    fun start(script: String): WorkflowStatus {
+    fun start(script: String, requestId: String? = null): WorkflowStatus {
+        cancelCurrentForReplacementLocked()
+        executionId++
+        service.cancelImageWatch()
+        currentRequestId = requestId
+
         val parsed = try {
             parse(script)
         } catch (error: IllegalArgumentException) {
-            executionId++
-            service.cancelImageWatch()
             steps = emptyList()
             index = 0
             actionInFlight = false
             setStatus(
                 WorkflowStatus(
                     state = "failed",
-                    error = error.message ?: "invalid_workflow"
+                    error = error.message ?: "invalid_workflow",
+                    requestId = currentRequestId
                 )
             )
+            currentRequestId = null
             return status
         }
-
-        executionId++
-        service.cancelImageWatch()
 
         if (parsed.isEmpty()) {
             steps = emptyList()
             index = 0
             actionInFlight = false
-            setStatus(WorkflowStatus(state = "failed", error = "empty_workflow"))
+            setStatus(
+                WorkflowStatus(
+                    state = "failed",
+                    error = "empty_workflow",
+                    requestId = currentRequestId
+                )
+            )
+            currentRequestId = null
             return status
         }
 
@@ -76,7 +88,8 @@ class WorkflowEngine(
             WorkflowStatus(
                 state = "running",
                 stepIndex = 0,
-                stepCount = steps.size
+                stepCount = steps.size,
+                requestId = currentRequestId
             )
         )
         advanceLocked()
@@ -85,12 +98,19 @@ class WorkflowEngine(
 
     @Synchronized
     fun stop(): WorkflowStatus {
+        val requestId = currentRequestId
         executionId++
         service.cancelImageWatch()
         steps = emptyList()
         index = 0
         actionInFlight = false
-        setStatus(WorkflowStatus(state = "stopped"))
+        setStatus(
+            WorkflowStatus(
+                state = "stopped",
+                requestId = requestId
+            )
+        )
+        currentRequestId = null
         return status
     }
 
@@ -100,6 +120,32 @@ class WorkflowEngine(
         if (steps.getOrNull(index) is WorkflowStep.Wait) {
             advanceLocked()
         }
+    }
+
+    /**
+     * Fast path for WAIT. The Accessibility event source is checked before the
+     * periodic full-tree snapshot is rebuilt. If WAIT is immediately followed
+     * by CLICK for the same target, click directly from this small subtree.
+     */
+    @Synchronized
+    fun onAccessibilitySource(source: AccessibilityNodeInfo?): Boolean {
+        if (source == null || actionInFlight || status.state != "waiting") return false
+        val waitStep = steps.getOrNull(index) as? WorkflowStep.Wait ?: return false
+        if (!service.isTargetReadyInSubtree(source, waitStep.target)) return false
+
+        index++
+        val next = steps.getOrNull(index)
+        if (
+            next is WorkflowStep.Click &&
+            sameTextTarget(waitStep.target, next.target) &&
+            service.clickTextInSubtree(source, next.target)
+        ) {
+            setStatus(statusFor("running", next))
+            index++
+        }
+
+        advanceLocked()
+        return true
     }
 
     @Synchronized
@@ -166,6 +212,7 @@ class WorkflowEngine(
                 }
 
                 WorkflowStep.Back -> {
+                    setStatus(statusFor("running", step))
                     if (!service.performSystemAction("back")) {
                         failLocked("back_not_applied", step)
                         return
@@ -174,6 +221,7 @@ class WorkflowEngine(
                 }
 
                 WorkflowStep.Home -> {
+                    setStatus(statusFor("running", step))
                     if (!service.performSystemAction("home")) {
                         failLocked("home_not_applied", step)
                         return
@@ -182,6 +230,7 @@ class WorkflowEngine(
                 }
 
                 WorkflowStep.Recents -> {
+                    setStatus(statusFor("running", step))
                     if (!service.performSystemAction("recents")) {
                         failLocked("recents_not_applied", step)
                         return
@@ -206,13 +255,16 @@ class WorkflowEngine(
             }
         }
 
+        val requestId = currentRequestId
         setStatus(
             WorkflowStatus(
                 state = "completed",
                 stepIndex = steps.size,
-                stepCount = steps.size
+                stepCount = steps.size,
+                requestId = requestId
             )
         )
+        currentRequestId = null
     }
 
     private fun startSwipeLocked(direction: String, step: WorkflowStep) {
@@ -238,8 +290,8 @@ class WorkflowEngine(
     }
 
     private fun startImageWaitLocked(target: String, step: WorkflowStep) {
-        // Arm the state before the matcher so a frame that matches immediately
-        // cannot race ahead of the workflow state.
+        // Arm state before the matcher so an immediate frame match cannot race
+        // ahead of the workflow state.
         actionInFlight = true
         val error = service.startImageWatch(target)
         if (error != null) {
@@ -272,13 +324,30 @@ class WorkflowEngine(
     private fun failLocked(error: String, step: WorkflowStep) {
         service.cancelImageWatch()
         actionInFlight = false
+        val requestId = currentRequestId
         setStatus(
             statusFor(
                 state = "failed",
                 step = step,
                 error = error
+            ).copy(requestId = requestId)
+        )
+        currentRequestId = null
+    }
+
+    private fun cancelCurrentForReplacementLocked() {
+        val requestId = currentRequestId ?: return
+        if (status.state in TERMINAL_STATES) return
+        setStatus(
+            WorkflowStatus(
+                state = "cancelled",
+                stepIndex = index,
+                stepCount = steps.size,
+                error = "replaced_by_new_workflow",
+                requestId = requestId
             )
         )
+        currentRequestId = null
     }
 
     private fun statusFor(
@@ -291,7 +360,8 @@ class WorkflowEngine(
         stepCount = steps.size,
         command = commandName(step),
         target = targetOf(step),
-        error = error
+        error = error,
+        requestId = currentRequestId
     )
 
     private fun setStatus(newStatus: WorkflowStatus) {
@@ -328,7 +398,12 @@ class WorkflowEngine(
     private fun sameImageName(left: String, right: String): Boolean =
         left.trim().equals(right.trim(), ignoreCase = true)
 
+    private fun sameTextTarget(left: String, right: String): Boolean =
+        AgentRuntime.normalizeForMatch(left) == AgentRuntime.normalizeForMatch(right)
+
     companion object {
+        private val TERMINAL_STATES = setOf("completed", "failed", "stopped", "cancelled")
+
         fun parse(script: String): List<WorkflowStep> {
             val tokens = script
                 .replace("\r", "\n")
