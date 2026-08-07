@@ -6,10 +6,16 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.Locale
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.NodeSnapshot
 
 class GenericAccessibilityService : AccessibilityService() {
+    private data class ClickCandidate(
+        val node: AccessibilityNodeInfo,
+        val priority: Int
+    )
+
     private var generation = 0L
 
     override fun onServiceConnected() {
@@ -100,18 +106,49 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     fun clickText(requestedText: String): Boolean {
-        val expected = normalize(requestedText)
+        val expected = normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
         val root = rootInActiveWindow ?: return false
-        return root.findAccessibilityNodeInfosByText(requestedText)
-            .asSequence()
-            .filter { it.isVisibleToUser }
-            .filter { node ->
-                normalize(listOfNotNull(node.text, node.contentDescription).joinToString(" ")) == expected
+        val candidates = ArrayList<ClickCandidate>()
+        collectClickCandidates(root, expected, candidates, depth = 0)
+
+        // Exact text/description is preferred. If there is no exact match,
+        // a node containing the requested phrase is allowed. Matching ignores
+        // case and every kind of whitespace, including line breaks and NBSP.
+        for (candidate in candidates.sortedBy { it.priority }) {
+            val target = clickableNode(candidate.node) ?: continue
+            if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+        return false
+    }
+
+    private fun collectClickCandidates(
+        node: AccessibilityNodeInfo,
+        expected: String,
+        output: MutableList<ClickCandidate>,
+        depth: Int
+    ) {
+        if (depth > MAX_DEPTH || output.size >= MAX_CLICK_CANDIDATES) return
+
+        if (node.isVisibleToUser) {
+            val text = normalizeForMatch(node.text?.toString().orEmpty())
+            val description = normalizeForMatch(node.contentDescription?.toString().orEmpty())
+            val priority = when {
+                text.isNotBlank() && text == expected -> 0
+                description.isNotBlank() && description == expected -> 1
+                text.isNotBlank() && text.contains(expected) -> 2
+                description.isNotBlank() && description.contains(expected) -> 3
+                else -> null
             }
-            .mapNotNull(::clickableNode)
-            .firstOrNull { it.performAction(AccessibilityNodeInfo.ACTION_CLICK) } != null
+            if (priority != null) output += ClickCandidate(node, priority)
+        }
+
+        for (index in 0 until node.childCount) {
+            if (output.size >= MAX_CLICK_CANDIDATES) break
+            val child = node.getChild(index) ?: continue
+            collectClickCandidates(child, expected, output, depth + 1)
+        }
     }
 
     private fun clickableNode(start: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -123,10 +160,14 @@ class GenericAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun normalize(value: String): String = value
-        .trim()
-        .lowercase()
-        .replace(Regex("\\s+"), " ")
+    private fun normalizeForMatch(value: String): String = value
+        .lowercase(Locale.ROOT)
+        .filterNot { ch ->
+            ch.isWhitespace() ||
+                Character.isSpaceChar(ch) ||
+                ch == '\u200B' ||
+                ch == '\uFEFF'
+        }
 
     override fun onInterrupt() {
         AgentRuntime.disconnect()
@@ -146,6 +187,7 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val SWIPE_DURATION_MS = 350L
         private const val MAX_NODES = 10_000
         private const val MAX_DEPTH = 100
-        private const val MAX_CLICK_PARENT_DEPTH = 5
+        private const val MAX_CLICK_PARENT_DEPTH = 8
+        private const val MAX_CLICK_CANDIDATES = 1_000
     }
 }
