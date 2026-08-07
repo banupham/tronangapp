@@ -10,6 +10,8 @@ Bản sao tối giản từ ý tưởng của `shopee-accessibility-agent`, dùn
 - Giữ thao tác thủ công qua CMD: `swipe up/down` và `click_text`.
 - **Không có AUTO**, không có logic tự tìm mục tiêu, tự click hoặc tự thu thập.
 - `click_text` chỉ chạy khi có lệnh ADB/CMD gọi vào và thao tác trên app đang ở foreground.
+- `click_text` so khớp cả `text` và `contentDescription`, ưu tiên khớp chính xác rồi mới khớp chứa chuỗi.
+- Khi so khớp, app bỏ qua chữ hoa/thường và toàn bộ khoảng trắng: space, nhiều space, xuống dòng, tab, NBSP và zero-width space.
 - Giữ cổng lệnh CMD/ADB bằng `ContentProvider`.
 
 ## Cổng CMD
@@ -60,10 +62,29 @@ adb shell content call --uri content://vn.banupham.tronangapp.commands --method 
 Hoặc:
 
 ```cmd
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "Tiếp tục"
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "новое сообщение"
 ```
 
-`click_text` không kiểm tra package Shopee. Nó tìm text/contentDescription trong cửa sổ Accessibility đang active, rồi click node hoặc parent clickable gần nhất.
+Nếu node có description như:
+
+```text
+Поступило новое сообщение от пользователя joi76 07.08.2026 18:08:06
+```
+
+thì `--arg "новое сообщение"` vẫn khớp và click được nếu node hoặc parent của nó hỗ trợ `ACTION_CLICK`.
+
+Khoảng trắng bên trong chuỗi được bỏ qua khi so khớp, nên các dạng sau được coi tương đương:
+
+```text
+Новое сообщение
+Новое    сообщение
+Новое\nсообщение
+Новое сообщение
+```
+
+Lưu ý: ở Windows CMD, nếu tham số có khoảng trắng thì **vẫn phải đặt toàn bộ `--arg` trong dấu ngoặc kép** để CMD truyền nó thành một đối số duy nhất.
+
+`click_text` không kiểm tra package Shopee. Nó duyệt cây Accessibility của cửa sổ đang active, tìm trong cả `text` và `contentDescription`, rồi click node hoặc parent clickable gần nhất.
 
 ### AUTO
 
