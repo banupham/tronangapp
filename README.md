@@ -1,100 +1,182 @@
 # Trợ năng App
 
-Bản sao tối giản từ ý tưởng của `shopee-accessibility-agent`, dùng để **đọc cây Accessibility của ứng dụng đang mở mà không khóa cứng package Shopee**.
+Bản trợ năng Android tổng quát, không khóa cứng package, dùng Accessibility để đọc cây UI, click, vuốt và chạy chuỗi lệnh theo sự kiện.
 
-## Trạng thái hiện tại
+## Bản 0.2.0
 
 - Android 10+ (`minSdk 29`).
-- Không giới hạn `android:packageNames`: có thể quan sát app đang ở foreground nếu Android cung cấp cây Accessibility.
-- Đọc trạng thái và danh sách node của app đang mở.
-- Giữ thao tác thủ công qua CMD: `swipe up/down` và `click_text`.
-- **Không có AUTO**, không có logic tự tìm mục tiêu, tự click hoặc tự thu thập.
-- `click_text` chỉ chạy khi có lệnh ADB/CMD gọi vào và thao tác trên app đang ở foreground.
-- `click_text` so khớp cả `text` và `contentDescription`, ưu tiên khớp chính xác rồi mới khớp chứa chuỗi.
-- Khi so khớp, app bỏ qua chữ hoa/thường và toàn bộ khoảng trắng: space, nhiều space, xuống dòng, tab, NBSP và zero-width space.
-- Giữ cổng lệnh CMD/ADB bằng `ContentProvider`.
+- Không giới hạn `android:packageNames`.
+- Cây Accessibility được cập nhật khi có event và tạo index text/description trong RAM.
+- `click_text` ưu tiên index RAM để giảm độ trễ, sau đó mới fallback quét root nếu node index đã stale.
+- `android:notificationTimeout=0` để giảm batching event.
+- Có workflow event-driven với 4 chỉ lệnh lõi: `CLICK`, `UP`, `DOWN`, `WAIT`.
+- `WAIT` **không dùng sleep theo giây**. Nó treo workflow tại bước đó và chỉ chạy tiếp khi text/description mục tiêu xuất hiện trong cây Accessibility đang nhìn thấy.
+- Có WebSocket client thường trực. URL được lưu lại và AccessibilityService sẽ tự kết nối lại khi service khởi động.
+- WebSocket tự ping mỗi 20 giây và reconnect theo backoff 1s -> 2s -> 4s ... tối đa 15s.
+- Giữ lại ContentProvider/ADB để test nhanh trong giai đoạn phát triển.
+- Lệnh legacy `auto` vẫn tắt; workflow chỉ chạy khi được gửi rõ ràng.
 
-## Cổng CMD
+## Cú pháp workflow
 
-Authority mới (để cài song song với app Shopee Agent):
+Mỗi bước cách nhau bằng `;` hoặc xuống dòng.
+
+```text
+WAIT:Новое сообщение
+CLICK:Новое сообщение
+DOWN
+WAIT:Продолжить
+CLICK:Продолжить
+UP
+```
+
+Có thể gửi một dòng:
+
+```text
+WAIT:Новое сообщение;CLICK:Новое сообщение;DOWN;WAIT:Продолжить;CLICK:Продолжить
+```
+
+Ý nghĩa:
+
+```text
+CLICK:text   -> tìm text/contentDescription và click node hoặc parent clickable gần nhất
+UP           -> vuốt lên
+DOWN         -> vuốt xuống
+WAIT:text    -> chờ theo Accessibility event cho tới khi text/contentDescription xuất hiện
+```
+
+`WAIT` không có timeout mặc định và không dùng delay cố định. Khi chưa thấy mục tiêu, workflow ở trạng thái `waiting`. Mỗi Accessibility event mới cập nhật index RAM; đúng thời điểm mục tiêu xuất hiện thì workflow tiếp tục ngay.
+
+So khớp bỏ qua chữ hoa/thường và toàn bộ khoảng trắng. Ví dụ:
+
+```text
+Новое сообщение
+новоесообщение
+Новое    сообщение
+```
+
+được coi tương đương. Match chính xác được ưu tiên trước match chứa chuỗi.
+
+## Test workflow bằng ADB
+
+Authority:
 
 ```text
 vn.banupham.tronangapp.commands
 ```
 
-### Xem trạng thái
+Ví dụ:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg "WAIT:Новое сообщение;CLICK:Новое сообщение;DOWN"
+```
+
+Nếu Windows CMD gây rắc rối với khoảng trắng, có thể bỏ khoảng trắng trong target vì app tự chuẩn hóa:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg "WAIT:Новоесообщение;CLICK:Новоесообщение;DOWN"
+```
+
+Dừng workflow:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow_stop
+```
+
+Xem trạng thái:
 
 ```cmd
 adb shell content query --uri content://vn.banupham.tronangapp.commands/status
 ```
 
-Các trường đáng chú ý:
+Các trường mới:
 
 ```text
-package
-nodes
-service_connected
-click_actions_enabled=true
-auto_actions_enabled=false
+workflow_state
+workflow_step
+workflow_total
+workflow_command
+workflow_target
+workflow_error
+socket_state
+socket_url
 ```
 
-### Đọc node đang nhìn thấy
+## Lệnh đơn
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method click --arg "Новое сообщение"
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method up
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method down
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method wait --arg "Продолжить"
+```
+
+`click_text` và `swipe --arg up/down` cũ vẫn hoạt động.
+
+## WebSocket thường trực
+
+Kết nối một lần trong lúc test:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method socket_connect --arg "ws://192.168.1.100:8765/ws"
+```
+
+App lưu URL. Sau đó có thể tắt ADB; khi AccessibilityService chạy, app chủ động kết nối ra URL đã lưu.
+
+Server chỉ cần gửi text workflow qua WebSocket, ví dụ:
+
+```text
+WAIT:Новое сообщение;CLICK:Новое сообщение;DOWN
+```
+
+Hoặc lệnh đơn:
+
+```text
+CLICK:Продолжить
+UP
+DOWN
+```
+
+Server gửi:
+
+```text
+PING
+```
+
+app trả:
+
+```json
+{"type":"pong"}
+```
+
+Gửi:
+
+```text
+STOP
+```
+
+để dừng workflow hiện tại.
+
+App cũng gửi trạng thái workflow dạng JSON, ví dụ:
+
+```json
+{"type":"workflow","state":"waiting","step":0,"total":3,"command":"WAIT","target":"Новое сообщение","error":null}
+```
+
+Ngắt socket và xóa URL đã lưu:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method socket_disconnect
+```
+
+Khi dùng qua Internet nên dùng `wss://` thay vì `ws://`.
+
+## Node tree
 
 ```cmd
 adb shell content query --uri content://vn.banupham.tronangapp.commands/nodes
 ```
 
-### Vuốt
-
-```cmd
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method swipe --arg up
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method swipe --arg down
-```
-
-### Click theo text
-
-Ví dụ:
-
-```cmd
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "Lưu"
-```
-
-Hoặc:
-
-```cmd
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "новое сообщение"
-```
-
-Nếu node có description như:
-
-```text
-Поступило новое сообщение от пользователя joi76 07.08.2026 18:08:06
-```
-
-thì `--arg "новое сообщение"` vẫn khớp và click được nếu node hoặc parent của nó hỗ trợ `ACTION_CLICK`.
-
-Khoảng trắng bên trong chuỗi được bỏ qua khi so khớp, nên các dạng sau được coi tương đương:
-
-```text
-Новое сообщение
-Новое    сообщение
-Новое\nсообщение
-Новое сообщение
-```
-
-Lưu ý: ở Windows CMD, nếu tham số có khoảng trắng thì **vẫn phải đặt toàn bộ `--arg` trong dấu ngoặc kép** để CMD truyền nó thành một đối số duy nhất.
-
-`click_text` không kiểm tra package Shopee. Nó duyệt cây Accessibility của cửa sổ đang active, tìm trong cả `text` và `contentDescription`, rồi click node hoặc parent clickable gần nhất.
-
-### AUTO
-
-AUTO đã tắt trong bản này. Lệnh:
-
-```cmd
-adb shell content call --uri content://vn.banupham.tronangapp.commands --method auto --arg on
-```
-
-sẽ không bật hành động tự động và trả lỗi `auto_actions_disabled`.
+Node hiện có thêm trường `enabled` bên cạnh `clickable`.
 
 ## Build
 
