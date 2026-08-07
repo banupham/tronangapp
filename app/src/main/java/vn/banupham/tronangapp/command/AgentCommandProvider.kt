@@ -40,6 +40,7 @@ class AgentCommandProvider : ContentProvider() {
                     status.generation,
                     status.lastEvent,
                     GenericAccessibilityService.instance != null,
+                    true,
                     false
                 )
             )
@@ -77,17 +78,20 @@ class AgentCommandProvider : ContentProvider() {
             }
         }
 
-        if (method != "swipe") {
-            return Bundle().apply {
-                putBoolean("success", false)
-                putString("error", "unsupported_command_click_actions_disabled")
-            }
+        val success = when (method) {
+            "swipe" -> arg != null && service.swipe(arg)
+            "click_text" -> arg != null && service.clickText(arg)
+            "auto" -> false
+            else -> false
         }
 
-        val success = arg != null && service.swipe(arg)
         return Bundle().apply {
             putBoolean("success", success)
-            if (!success) putString("error", "command_not_applied")
+            when {
+                method == "auto" -> putString("error", "auto_actions_disabled")
+                method != "swipe" && method != "click_text" -> putString("error", "unsupported_command")
+                !success -> putString("error", "command_not_applied")
+            }
         }
     }
 
@@ -111,7 +115,8 @@ class AgentCommandProvider : ContentProvider() {
             "generation",
             "last_event",
             "service_connected",
-            "click_actions_enabled"
+            "click_actions_enabled",
+            "auto_actions_enabled"
         )
 
         private val NODE_COLUMNS = arrayOf(
