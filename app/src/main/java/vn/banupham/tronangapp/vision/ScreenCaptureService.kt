@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -26,10 +27,30 @@ class ScreenCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
+    private var latestImage: Image? = null
+    private var lastProbedWatch: String? = null
 
     private var width: Int = 0
     private var height: Int = 0
     private var densityDpi: Int = 0
+
+    private val cachedFrameProbe = object : Runnable {
+        override fun run() {
+            val handler = captureHandler ?: return
+            val watch = ImageTargetRuntime.activeWatchName()
+
+            if (watch == null) {
+                lastProbedWatch = null
+            } else if (watch != lastProbedWatch) {
+                lastProbedWatch = watch
+                latestImage?.let { image ->
+                    ImageTargetRuntime.processFrame(image, width, height)
+                }
+            }
+
+            handler.postDelayed(this, CACHED_FRAME_PROBE_MS)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -89,15 +110,19 @@ class ScreenCaptureService : Service() {
             }
         }, captureHandler)
 
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        // Keep one already acquired image available as the latest stable frame.
+        // maxImages=3 leaves enough room for acquireLatestImage() while one image
+        // remains held for immediate WAIT_IMG / CLICK_IMG checks.
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         imageReader = reader
         reader.setOnImageAvailableListener({ source ->
             val image = source.acquireLatestImage() ?: return@setOnImageAvailableListener
-            try {
-                ImageTargetRuntime.processFrame(image, width, height)
-            } finally {
-                image.close()
-            }
+
+            runCatching { latestImage?.close() }
+            latestImage = image
+
+            // If a workflow is already waiting, evaluate this fresh frame now.
+            ImageTargetRuntime.processFrame(image, width, height)
         }, captureHandler)
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
@@ -111,6 +136,12 @@ class ScreenCaptureService : Service() {
             captureHandler
         )
         running = true
+
+        // MediaProjection may not emit a new ImageReader frame while the screen
+        // is visually static. Probe the retained latest frame whenever a new
+        // image watch is armed so /find and CLICK_IMG do not wait seconds for an
+        // unrelated redraw.
+        captureHandler?.post(cachedFrameProbe)
     }
 
     /**
@@ -157,6 +188,12 @@ class ScreenCaptureService : Service() {
         captureWidth = 0
         captureHeight = 0
         captureDensityDpi = 0
+
+        captureHandler?.removeCallbacks(cachedFrameProbe)
+        lastProbedWatch = null
+        runCatching { latestImage?.close() }
+        latestImage = null
+
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
         runCatching { imageReader?.close() }
@@ -225,6 +262,7 @@ class ScreenCaptureService : Service() {
         var captureDensityDpi: Int = 0
             private set
 
+        private const val CACHED_FRAME_PROBE_MS = 16L
         private const val CHANNEL_ID = "tronangapp_capture"
         private const val NOTIFICATION_ID = 1201
     }
