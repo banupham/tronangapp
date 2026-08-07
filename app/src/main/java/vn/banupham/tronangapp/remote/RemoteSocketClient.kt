@@ -3,6 +3,7 @@ package vn.banupham.tronangapp.remote
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,6 +35,7 @@ class RemoteSocketClient(
     private var shouldReconnect = false
     private var reconnectDelayMs = 1_000L
     private var reconnectScheduled = false
+    private val pendingMessages = ArrayDeque<String>()
 
     private val reconnectRunnable = Runnable {
         synchronized(this) {
@@ -56,6 +58,9 @@ class RemoteSocketClient(
             return false
         }
 
+        if (url != null && url != normalized) {
+            pendingMessages.clear()
+        }
         if (persist) {
             preferences.edit().putString(KEY_URL, normalized).apply()
         }
@@ -81,13 +86,27 @@ class RemoteSocketClient(
         webSocket = null
         oldSocket?.close(1000, "client_disconnect")
         state = "disconnected"
+        pendingMessages.clear()
         if (clearSavedUrl) {
             preferences.edit().remove(KEY_URL).apply()
             url = null
         }
     }
 
-    fun send(message: String): Boolean = webSocket?.send(message) == true
+    /**
+     * Send immediately when the socket is healthy. If the socket is between
+     * connections, keep a bounded queue so ACK/completion messages are not
+     * silently lost during a short reconnect window.
+     */
+    @Synchronized
+    fun send(message: String): Boolean {
+        val socket = webSocket
+        if (state == "connected" && socket != null && socket.send(message)) {
+            return true
+        }
+        enqueuePendingLocked(message)
+        return false
+    }
 
     @Synchronized
     private fun openSocketLocked() {
@@ -95,6 +114,21 @@ class RemoteSocketClient(
         state = "connecting"
         val request = Request.Builder().url(target).build()
         webSocket = client.newWebSocket(request, listener)
+    }
+
+    private fun enqueuePendingLocked(message: String) {
+        while (pendingMessages.size >= MAX_PENDING_MESSAGES) {
+            pendingMessages.removeFirst()
+        }
+        pendingMessages.addLast(message)
+    }
+
+    private fun flushPendingLocked(socket: WebSocket) {
+        while (pendingMessages.isNotEmpty()) {
+            val message = pendingMessages.first()
+            if (!socket.send(message)) return
+            pendingMessages.removeFirst()
+        }
     }
 
     @Synchronized
@@ -115,8 +149,9 @@ class RemoteSocketClient(
                 state = "connected"
                 reconnectDelayMs = 1_000L
                 reconnectScheduled = false
+                webSocket.send("{\"type\":\"ready\",\"source\":\"tronangapp\"}")
+                flushPendingLocked(webSocket)
             }
-            webSocket.send("{\"type\":\"ready\",\"source\":\"tronangapp\"}")
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -152,5 +187,6 @@ class RemoteSocketClient(
     companion object {
         private const val PREFS_NAME = "remote_socket"
         private const val KEY_URL = "url"
+        private const val MAX_PENDING_MESSAGES = 200
     }
 }
