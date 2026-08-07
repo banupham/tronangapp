@@ -3,8 +3,11 @@ package vn.banupham.tronangapp.ui
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.Activity
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,11 +21,15 @@ import android.widget.ScrollView
 import android.widget.TextView
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.vision.ImageTargetRuntime
+import vn.banupham.tronangapp.vision.ScreenCaptureService
 
 class MainActivity : Activity() {
     private lateinit var permissionStatus: TextView
+    private lateinit var captureStatus: TextView
     private lateinit var runtimeStatus: TextView
     private val handler = Handler(Looper.getMainLooper())
+
     private val refreshLoop = object : Runnable {
         override fun run() {
             refresh()
@@ -47,6 +54,23 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
+    @Deprecated("Deprecated in Android API but kept for minSdk 29 compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SCREEN_CAPTURE) return
+        if (resultCode != RESULT_OK || data == null) return
+
+        val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
+
     private fun buildContent(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -58,7 +82,7 @@ class MainActivity : Activity() {
         }, matchWrap())
 
         addView(TextView(context).apply {
-            text = "Đọc cây Accessibility của app đang mở. Không khóa package. Toàn bộ hành động click/AUTO đang tắt."
+            text = "Accessibility + workflow socket + tìm ảnh ROI. Không khóa package."
             textSize = 16f
             setPadding(0, 20, 0, 20)
         }, matchWrap())
@@ -71,8 +95,30 @@ class MainActivity : Activity() {
             setOnClickListener { openAccessibilitySettings() }
         }, matchWrap())
 
+        captureStatus = TextView(context).apply {
+            textSize = 18f
+            setPadding(0, 24, 0, 8)
+        }
+        addView(captureStatus, matchWrap())
+
+        addView(Button(context).apply {
+            text = "Bật chụp màn hình / tìm ảnh"
+            setOnClickListener { requestScreenCapture() }
+        }, matchWrap())
+
+        addView(Button(context).apply {
+            text = "Tắt chụp màn hình"
+            setOnClickListener { stopScreenCapture() }
+        }, matchWrap())
+
         addView(TextView(context).apply {
-            text = "CMD:\nadb shell content query --uri content://vn.banupham.tronangapp.commands/status\n\nadb shell content query --uri content://vn.banupham.tronangapp.commands/nodes\n\nadb shell content call --uri content://vn.banupham.tronangapp.commands --method swipe --arg up"
+            text = "Lưu ý: Android bắt buộc hiện hộp thoại cho phép chụp màn hình. Sau khi cho phép, ảnh mục tiêu được tìm local trên điện thoại; ảnh màn hình không cần gửi qua socket."
+            textSize = 14f
+            setPadding(0, 12, 0, 12)
+        }, matchWrap())
+
+        addView(TextView(context).apply {
+            text = "CMD:\nadb shell content query --uri content://vn.banupham.tronangapp.commands/status\n\nadb shell content query --uri content://vn.banupham.tronangapp.commands/nodes\n\nadb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg \"BACK;SLEEP:0.5;HOME\""
             textSize = 14f
             setTextIsSelectable(true)
             setPadding(0, 28, 0, 12)
@@ -90,10 +136,22 @@ class MainActivity : Activity() {
         permissionStatus.text = if (enabled) "✓ Trợ năng đã bật" else "⚠ Trợ năng chưa bật"
         permissionStatus.setTextColor(if (enabled) Color.rgb(32, 128, 64) else Color.rgb(190, 70, 30))
 
+        val captureRunning = ScreenCaptureService.running
+        captureStatus.text = if (captureRunning) {
+            "✓ Chụp màn hình đang chạy"
+        } else {
+            "⚠ Chụp màn hình chưa chạy (WAIT_IMG/CLICK_IMG chưa dùng được)"
+        }
+        captureStatus.setTextColor(
+            if (captureRunning) Color.rgb(32, 128, 64) else Color.rgb(190, 70, 30)
+        )
+
         val status = AgentRuntime.status
+        val service = GenericAccessibilityService.instance
+        val workflow = service?.workflowStatus()
         runtimeStatus.text = buildString {
             append("Service: ")
-            append(if (GenericAccessibilityService.instance != null) "đã kết nối" else "chưa kết nối")
+            append(if (service != null) "đã kết nối" else "chưa kết nối")
             append("\nPackage hiện tại: ")
             append(status.packageName ?: "—")
             append("\nNodes: ")
@@ -102,8 +160,25 @@ class MainActivity : Activity() {
             append(status.generation)
             append("\nEvent cuối: ")
             append(status.lastEvent ?: "—")
-            append("\nClick actions: TẮT")
+            append("\nSocket: ")
+            append(service?.socketState() ?: "disconnected")
+            append("\nWorkflow: ")
+            append(workflow?.state ?: "idle")
+            append("\nImage targets RAM: ")
+            append(ImageTargetRuntime.targetCount())
+            append("\nImage watch: ")
+            append(ImageTargetRuntime.activeWatchName() ?: "—")
         }
+    }
+
+    private fun requestScreenCapture() {
+        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        @Suppress("DEPRECATION")
+        startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
+    }
+
+    private fun stopScreenCapture() {
+        stopService(Intent(this, ScreenCaptureService::class.java))
     }
 
     private fun openAccessibilitySettings() {
@@ -131,4 +206,8 @@ class MainActivity : Activity() {
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.WRAP_CONTENT
     )
+
+    companion object {
+        private const val REQUEST_SCREEN_CAPTURE = 7101
+    }
 }
