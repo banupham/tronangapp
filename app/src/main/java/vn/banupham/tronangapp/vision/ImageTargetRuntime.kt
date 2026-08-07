@@ -90,6 +90,7 @@ object ImageTargetRuntime {
             require(bitmap.width > 0 && bitmap.height > 0) { "invalid_template_size" }
             val samples = buildSamples(bitmap.width, bitmap.height) { x, y -> bitmap.getPixel(x, y) }
             require(samples.isNotEmpty()) { "image_has_no_usable_pixels" }
+            val safeThreshold = if (threshold.isFinite()) threshold.coerceIn(0.50, 0.999) else 0.90
 
             val target = ImageTarget(
                 name = cleanName,
@@ -100,7 +101,7 @@ object ImageTargetRuntime {
                 roiTop = roiTop,
                 roiRight = roiRight,
                 roiBottom = roiBottom,
-                threshold = threshold.coerceIn(0.50, 0.999)
+                threshold = safeThreshold
             )
             targets[normalizeName(cleanName)] = target
             target
@@ -268,7 +269,9 @@ object ImageTargetRuntime {
             total += kotlin.math.abs(red - sample.red)
             total += kotlin.math.abs(green - sample.green)
             total += kotlin.math.abs(blue - sample.blue)
-            if (total > abortAbove) return total
+            if (total > abortAbove) {
+                return if (abortAbove == Long.MAX_VALUE) total else abortAbove + 1L
+            }
         }
         return total
     }
