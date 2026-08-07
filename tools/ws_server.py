@@ -64,6 +64,12 @@ def image_put_command(parts):
     )
 
 
+def split_console_line(line: str):
+    # posix=False preserves Windows backslashes such as C:\\temp\\claim.png.
+    parts = shlex.split(line, posix=False)
+    return [part.strip('"').strip("'") for part in parts]
+
+
 async def console():
     print("Commands:")
     print("  raw workflow, e.g. WAIT:OK;CLICK:OK;BACK;SLEEP:0.2;HOME")
@@ -83,7 +89,7 @@ async def console():
 
         try:
             if line.startswith("/img "):
-                message = image_put_command(shlex.split(line))
+                message = image_put_command(split_console_line(line))
             elif line.startswith("/find "):
                 name = line[len("/find "):].strip()
                 message = f"WAIT_IMG:{name}"
