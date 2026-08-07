@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Trợ năng App</string>
+    <string name="accessibility_description">Đọc cây giao diện của ứng dụng đang mở để kiểm thử qua ADB/CMD. Bản này không thực hiện click.</string>
+</resources>
