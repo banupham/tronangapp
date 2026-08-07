@@ -1,5 +1,7 @@
 package vn.banupham.tronangapp.runtime
 
+import java.util.Locale
+
 data class NodeSnapshot(
     val key: String,
     val text: String?,
@@ -10,6 +12,7 @@ data class NodeSnapshot(
     val top: Int,
     val right: Int,
     val bottom: Int,
+    val enabled: Boolean,
     val clickable: Boolean,
     val parentKey: String?
 )
@@ -31,9 +34,29 @@ object AgentRuntime {
     var nodes: List<NodeSnapshot> = emptyList()
         private set
 
+    @Volatile
+    private var visibleValues: Set<String> = emptySet()
+
+    @Volatile
+    private var readyValues: Set<String> = emptySet()
+
     @Synchronized
     fun update(packageName: String?, newNodes: List<NodeSnapshot>, generation: Long, lastEvent: String?) {
         nodes = newNodes
+
+        val visible = LinkedHashSet<String>()
+        val ready = LinkedHashSet<String>()
+        newNodes.forEach { node ->
+            listOfNotNull(node.text, node.contentDescription).forEach { raw ->
+                val normalized = normalizeForMatch(raw)
+                if (normalized.isBlank()) return@forEach
+                visible += normalized
+                if (node.enabled) ready += normalized
+            }
+        }
+        visibleValues = visible
+        readyValues = ready
+
         status = RuntimeStatus(
             connected = true,
             packageName = packageName,
@@ -43,9 +66,37 @@ object AgentRuntime {
         )
     }
 
+    fun isVisibleTarget(requested: String): Boolean = matches(visibleValues, requested)
+
+    fun isReadyTarget(requested: String): Boolean {
+        val ready = readyValues
+        if (matches(ready, requested)) return true
+        // Some apps expose a visible text node as disabled even though its
+        // clickable parent is already usable. Falling back to visible keeps
+        // WAIT event-driven instead of adding arbitrary time delays.
+        return matches(visibleValues, requested)
+    }
+
+    private fun matches(values: Set<String>, requested: String): Boolean {
+        val expected = normalizeForMatch(requested)
+        if (expected.isBlank()) return false
+        return values.any { value -> value == expected || value.contains(expected) }
+    }
+
+    fun normalizeForMatch(value: String): String = value
+        .lowercase(Locale.ROOT)
+        .filterNot { ch ->
+            ch.isWhitespace() ||
+                Character.isSpaceChar(ch) ||
+                ch == '\u200B' ||
+                ch == '\uFEFF'
+        }
+
     @Synchronized
     fun disconnect() {
         nodes = emptyList()
+        visibleValues = emptySet()
+        readyValues = emptySet()
         status = RuntimeStatus()
     }
 }
