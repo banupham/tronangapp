@@ -63,6 +63,15 @@ object ImageTargetRuntime {
     @Volatile
     private var activeWatch: String? = null
 
+    /**
+     * Monotonic token for every startWatch call. The target name alone is not
+     * enough because repeated /find calls normally watch the same image name.
+     * Screen capture uses this token to notice every newly armed watch even if
+     * it never observed the brief null state between two workflows.
+     */
+    @Volatile
+    private var watchGeneration: Long = 0L
+
     @Volatile
     var lastMatch: ImageMatch? = null
         private set
@@ -133,6 +142,7 @@ object ImageTargetRuntime {
         if (!targets.containsKey(key)) return false
         lastMatch = null
         activeWatch = key
+        watchGeneration++
         return true
     }
 
@@ -141,6 +151,8 @@ object ImageTargetRuntime {
     }
 
     fun activeWatchName(): String? = activeWatch?.let { targets[it]?.name ?: it }
+
+    fun activeWatchGeneration(): Long = if (activeWatch == null) 0L else watchGeneration
 
     fun processFrame(image: Image, screenWidth: Int, screenHeight: Int) {
         val key = activeWatch ?: return
