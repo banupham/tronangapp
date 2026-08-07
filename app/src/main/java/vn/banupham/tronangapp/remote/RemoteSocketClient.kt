@@ -64,7 +64,10 @@ class RemoteSocketClient(
         reconnectDelayMs = 1_000L
         handler.removeCallbacks(reconnectRunnable)
         reconnectScheduled = false
-        webSocket?.cancel()
+
+        val oldSocket = webSocket
+        webSocket = null
+        oldSocket?.cancel()
         openSocketLocked()
         return true
     }
@@ -74,8 +77,9 @@ class RemoteSocketClient(
         shouldReconnect = false
         handler.removeCallbacks(reconnectRunnable)
         reconnectScheduled = false
-        webSocket?.close(1000, "client_disconnect")
+        val oldSocket = webSocket
         webSocket = null
+        oldSocket?.close(1000, "client_disconnect")
         state = "disconnected"
         if (clearSavedUrl) {
             preferences.edit().remove(KEY_URL).apply()
@@ -104,6 +108,10 @@ class RemoteSocketClient(
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             synchronized(this@RemoteSocketClient) {
+                if (this@RemoteSocketClient.webSocket !== webSocket) {
+                    webSocket.cancel()
+                    return
+                }
                 state = "connected"
                 reconnectDelayMs = 1_000L
                 reconnectScheduled = false
@@ -112,6 +120,9 @@ class RemoteSocketClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            synchronized(this@RemoteSocketClient) {
+                if (this@RemoteSocketClient.webSocket !== webSocket) return
+            }
             onCommand(text)
         }
 
@@ -121,6 +132,7 @@ class RemoteSocketClient(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             synchronized(this@RemoteSocketClient) {
+                if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
                 this@RemoteSocketClient.webSocket = null
                 scheduleReconnectLocked()
@@ -129,6 +141,7 @@ class RemoteSocketClient(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             synchronized(this@RemoteSocketClient) {
+                if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
                 this@RemoteSocketClient.webSocket = null
                 scheduleReconnectLocked()
