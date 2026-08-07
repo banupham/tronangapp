@@ -6,10 +6,11 @@ Bản sao tối giản từ ý tưởng của `shopee-accessibility-agent`, dùn
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`: có thể quan sát app đang ở foreground nếu Android cung cấp cây Accessibility.
-- Chỉ đọc trạng thái và danh sách node.
-- **Đã tạm bỏ toàn bộ hành động click** và toàn bộ AUTO có thể dẫn tới click.
+- Đọc trạng thái và danh sách node của app đang mở.
+- Giữ thao tác thủ công qua CMD: `swipe up/down` và `click_text`.
+- **Không có AUTO**, không có logic tự tìm mục tiêu, tự click hoặc tự thu thập.
+- `click_text` chỉ chạy khi có lệnh ADB/CMD gọi vào và thao tác trên app đang ở foreground.
 - Giữ cổng lệnh CMD/ADB bằng `ContentProvider`.
-- Giữ lệnh `swipe up/down` để phục vụ test điều hướng; không có lệnh tap/click.
 
 ## Cổng CMD
 
@@ -25,6 +26,16 @@ vn.banupham.tronangapp.commands
 adb shell content query --uri content://vn.banupham.tronangapp.commands/status
 ```
 
+Các trường đáng chú ý:
+
+```text
+package
+nodes
+service_connected
+click_actions_enabled=true
+auto_actions_enabled=false
+```
+
 ### Đọc node đang nhìn thấy
 
 ```cmd
@@ -38,7 +49,31 @@ adb shell content call --uri content://vn.banupham.tronangapp.commands --method 
 adb shell content call --uri content://vn.banupham.tronangapp.commands --method swipe --arg down
 ```
 
-Các method click/auto không tồn tại trong bản này.
+### Click theo text
+
+Ví dụ:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "Lưu"
+```
+
+Hoặc:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method click_text --arg "Tiếp tục"
+```
+
+`click_text` không kiểm tra package Shopee. Nó tìm text/contentDescription trong cửa sổ Accessibility đang active, rồi click node hoặc parent clickable gần nhất.
+
+### AUTO
+
+AUTO đã tắt trong bản này. Lệnh:
+
+```cmd
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method auto --arg on
+```
+
+sẽ không bật hành động tự động và trả lỗi `auto_actions_disabled`.
 
 ## Build
 
