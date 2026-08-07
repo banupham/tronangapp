@@ -96,15 +96,7 @@ class GenericAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val label = event?.let { AccessibilityEvent.eventTypeToString(it.eventType) }
 
-        // Realtime path first. WAIT can react to event.source immediately and,
-        // for WAIT -> CLICK of the same text, click without waiting for a full
-        // Accessibility tree rebuild.
         workflowEngine.onAccessibilitySource(event?.source)
-
-        // Full-tree indexing remains useful for generic CLICK and diagnostics,
-        // but it is deliberately deferred until a burst of UI events becomes
-        // quiet. A maximum latency keeps the RAM index from becoming too old
-        // during a continuously animated/scrolling screen.
         scheduleSnapshotRefresh(label)
     }
 
@@ -125,11 +117,6 @@ class GenericAccessibilityService : AccessibilityService() {
         mainHandler.postDelayed(snapshotRunnable, delay)
     }
 
-    /**
-     * A socket command has higher latency priority than a diagnostic full-tree
-     * rebuild. If a snapshot is waiting in the main queue, push it back a bit
-     * while preserving the maximum refresh latency.
-     */
     private fun deferSnapshotForRealtimeCommand() {
         if (!snapshotScheduled) return
 
@@ -304,11 +291,8 @@ class GenericAccessibilityService : AccessibilityService() {
         val expected = AgentRuntime.normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
-        // Fast path: use the most recently indexed Accessibility tree.
         if (clickFromLiveIndex(expected)) return true
 
-        // Fallback for a stale index or a target that appeared since the last
-        // deferred snapshot.
         val root = rootInActiveWindow ?: return false
         val candidates = ArrayList<ClickCandidate>()
         collectClickCandidates(root, expected, candidates, depth = 0)
@@ -497,6 +481,9 @@ class GenericAccessibilityService : AccessibilityService() {
                 remoteSocket.send(JSONObject().apply {
                     put("type", "image_list")
                     put("capture_running", ScreenCaptureService.running)
+                    put("capture_width", ScreenCaptureService.captureWidth)
+                    put("capture_height", ScreenCaptureService.captureHeight)
+                    put("capture_density_dpi", ScreenCaptureService.captureDensityDpi)
                     put("active_watch", ImageTargetRuntime.activeWatchName() ?: JSONObject.NULL)
                     put("targets", JSONArray(ImageTargetRuntime.targetNames()))
                 }.toString())
@@ -506,6 +493,9 @@ class GenericAccessibilityService : AccessibilityService() {
                 remoteSocket.send(JSONObject().apply {
                     put("type", "capture_status")
                     put("running", ScreenCaptureService.running)
+                    put("capture_width", ScreenCaptureService.captureWidth)
+                    put("capture_height", ScreenCaptureService.captureHeight)
+                    put("capture_density_dpi", ScreenCaptureService.captureDensityDpi)
                     put("targets", ImageTargetRuntime.targetCount())
                     put("active_watch", ImageTargetRuntime.activeWatchName() ?: JSONObject.NULL)
                 }.toString())
@@ -528,11 +518,6 @@ class GenericAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * RECEIVED is emitted directly on OkHttp's WebSocket callback thread.
-     * STARTED is emitted from the Android main looper. postAtFrontOfQueue keeps
-     * a realtime socket command ahead of already queued diagnostic tree work.
-     */
     private fun enqueueWorkflow(script: String, requestId: String) {
         remoteSocket.send(commandAckJson(requestId, "received"))
         mainHandler.postAtFrontOfQueue {
@@ -660,6 +645,9 @@ class GenericAccessibilityService : AccessibilityService() {
         put("bottom", match.bottom)
         put("x", match.centerX)
         put("y", match.centerY)
+        put("capture_width", ScreenCaptureService.captureWidth)
+        put("capture_height", ScreenCaptureService.captureHeight)
+        put("capture_density_dpi", ScreenCaptureService.captureDensityDpi)
         put("timestamp_ms", match.timestampMs)
     }.toString()
 
@@ -721,22 +709,17 @@ class GenericAccessibilityService : AccessibilityService() {
             private set
 
         private val TERMINAL_WORKFLOW_STATES = setOf("completed", "failed", "stopped", "cancelled")
-
-        // Full tree is delayed until event bursts quiet down so scrolling and
-        // animation do not continuously occupy the main looper. It is still
-        // forced periodically to keep the RAM index reasonably fresh.
-        private const val TREE_REFRESH_DEBOUNCE_MS = 120L
-        private const val TREE_REFRESH_COMMAND_GRACE_MS = 150L
-        private const val TREE_REFRESH_MAX_LATENCY_MS = 500L
-
-        private const val FAST_SOURCE_MAX_NODES = 128
-        private const val FAST_SOURCE_MAX_CANDIDATES = 32
         private const val SWIPE_DURATION_MS = 350L
         private const val TAP_DURATION_MS = 1L
         private const val MAX_NODES = 10_000
         private const val MAX_DEPTH = 100
         private const val MAX_CLICK_PARENT_DEPTH = 8
         private const val MAX_CLICK_CANDIDATES = 1_000
+        private const val FAST_SOURCE_MAX_NODES = 96
+        private const val FAST_SOURCE_MAX_CANDIDATES = 24
+        private const val TREE_REFRESH_DEBOUNCE_MS = 70L
+        private const val TREE_REFRESH_COMMAND_GRACE_MS = 90L
+        private const val TREE_REFRESH_MAX_LATENCY_MS = 350L
         private const val DEFAULT_IMAGE_THRESHOLD = 0.90
     }
 }
