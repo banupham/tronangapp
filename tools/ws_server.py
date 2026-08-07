@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import itertools
 import json
 import shlex
+import time
 from pathlib import Path
 
 import websockets
@@ -9,6 +11,90 @@ import websockets
 HOST = "0.0.0.0"
 PORT = 8765
 clients = set()
+command_ids = itertools.count(1)
+pending = {}
+
+
+def now_ms(start_perf):
+    return (time.perf_counter() - start_perf) * 1000.0
+
+
+def new_command_id():
+    return f"pc-{next(command_ids)}"
+
+
+def register_pending(request_id, description):
+    pending[request_id] = {
+        "sent_perf": time.perf_counter(),
+        "description": description,
+        "received_phone_ms": None,
+        "started_phone_ms": None,
+    }
+    print(f"[{request_id}] SEND       {description}")
+
+
+def print_ack(obj):
+    request_id = str(obj.get("id", "?"))
+    state = str(obj.get("state", "?"))
+    phone_ms = obj.get("phone_ms")
+    item = pending.get(request_id)
+
+    if item is None:
+        print(f"[{request_id}] {state.upper():<10} phone_ms={phone_ms}")
+        return
+
+    elapsed = now_ms(item["sent_perf"])
+    extra = ""
+
+    if state == "received":
+        item["received_phone_ms"] = phone_ms
+        extra = "  (PC send -> phone ACK round-trip)"
+
+    elif state == "started":
+        item["started_phone_ms"] = phone_ms
+        received_phone_ms = item.get("received_phone_ms")
+        if isinstance(phone_ms, (int, float)) and isinstance(received_phone_ms, (int, float)):
+            extra = f"  phone_queue={phone_ms - received_phone_ms:.1f} ms"
+
+    elif state in {"completed", "failed", "stopped", "cancelled"}:
+        started_phone_ms = item.get("started_phone_ms")
+        if isinstance(phone_ms, (int, float)) and isinstance(started_phone_ms, (int, float)):
+            extra = f"  phone_execute={phone_ms - started_phone_ms:.1f} ms"
+        error = obj.get("error")
+        if error:
+            extra += f"  error={error}"
+
+    print(f"[{request_id}] {state.upper():<10} +{elapsed:8.1f} ms{extra}")
+
+    if state in {"completed", "failed", "stopped", "cancelled"}:
+        pending.pop(request_id, None)
+
+
+def handle_phone_message(message):
+    try:
+        obj = json.loads(message)
+    except Exception:
+        print("PHONE:", message)
+        return
+
+    if obj.get("type") == "ack":
+        print_ack(obj)
+        return
+
+    if obj.get("type") == "workflow":
+        request_id = obj.get("request_id")
+        print(
+            "PHONE workflow:",
+            f"id={request_id}",
+            f"state={obj.get('state')}",
+            f"step={obj.get('step')}/{obj.get('total')}",
+            f"command={obj.get('command')}",
+            f"target={obj.get('target')}",
+            f"error={obj.get('error')}",
+        )
+        return
+
+    print("PHONE:", message)
 
 
 async def handler(ws):
@@ -16,7 +102,7 @@ async def handler(ws):
     print(f"[+] phone connected ({len(clients)} client)")
     try:
         async for message in ws:
-            print("PHONE:", message)
+            handle_phone_message(message)
     finally:
         clients.discard(ws)
         print(f"[-] phone disconnected ({len(clients)} client)")
@@ -25,15 +111,50 @@ async def handler(ws):
 async def broadcast(message: str):
     if not clients:
         print("[!] no phone connected")
-        return
+        return 0
+
+    sent = 0
     dead = []
     for ws in list(clients):
         try:
             await ws.send(message)
+            sent += 1
         except Exception:
             dead.append(ws)
+
     for ws in dead:
         clients.discard(ws)
+    return sent
+
+
+async def send_workflow(script: str):
+    request_id = new_command_id()
+    register_pending(request_id, script)
+    message = json.dumps(
+        {
+            "cmd": "run",
+            "id": request_id,
+            "script": script,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if await broadcast(message) == 0:
+        pending.pop(request_id, None)
+
+
+async def send_stop():
+    request_id = new_command_id()
+    register_pending(request_id, "STOP")
+    message = json.dumps(
+        {
+            "cmd": "stop",
+            "id": request_id,
+        },
+        separators=(",", ":"),
+    )
+    if await broadcast(message) == 0:
+        pending.pop(request_id, None)
 
 
 def image_put_command(parts):
@@ -72,13 +193,20 @@ def split_console_line(line: str):
 
 async def console():
     print("Commands:")
-    print("  raw workflow, e.g. WAIT:OK;CLICK:OK;BACK;SLEEP:0.2;HOME")
+    print("  raw workflow, e.g. UP or WAIT:OK;CLICK:OK;BACK;SLEEP:0.2;HOME")
     print("  /img NAME FILE LEFT TOP RIGHT BOTTOM [THRESHOLD]")
     print("  /find NAME        -> WAIT_IMG:NAME")
     print("  /clickimg NAME    -> CLICK_IMG:NAME")
     print("  /images           -> list image targets")
     print("  /capture          -> capture status")
-    print("  /stop             -> stop workflow")
+    print("  /ping              -> socket ping/pong test")
+    print("  /stop              -> stop workflow")
+    print()
+    print("Latency ACKs:")
+    print("  RECEIVED  = phone WebSocket callback received the command")
+    print("  STARTED   = Android main thread started processing the workflow")
+    print("  COMPLETED = workflow finished")
+    print("  phone_queue shows RECEIVED -> STARTED time inside the phone")
     print()
 
     while True:
@@ -89,23 +217,23 @@ async def console():
 
         try:
             if line.startswith("/img "):
-                message = image_put_command(split_console_line(line))
+                await broadcast(image_put_command(split_console_line(line)))
             elif line.startswith("/find "):
                 name = line[len("/find "):].strip()
-                message = f"WAIT_IMG:{name}"
+                await send_workflow(f"WAIT_IMG:{name}")
             elif line.startswith("/clickimg "):
                 name = line[len("/clickimg "):].strip()
-                message = f"CLICK_IMG:{name}"
+                await send_workflow(f"CLICK_IMG:{name}")
             elif line == "/images":
-                message = json.dumps({"cmd": "image_list"})
+                await broadcast(json.dumps({"cmd": "image_list"}))
             elif line == "/capture":
-                message = json.dumps({"cmd": "capture_status"})
+                await broadcast(json.dumps({"cmd": "capture_status"}))
+            elif line == "/ping":
+                await broadcast("PING")
             elif line == "/stop":
-                message = "STOP"
+                await send_stop()
             else:
-                message = line
-
-            await broadcast(message)
+                await send_workflow(line)
         except Exception as error:
             print("ERROR:", error)
 
