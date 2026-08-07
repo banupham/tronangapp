@@ -238,12 +238,15 @@ class WorkflowEngine(
     }
 
     private fun startImageWaitLocked(target: String, step: WorkflowStep) {
+        // Arm the state before the matcher so a frame that matches immediately
+        // cannot race ahead of the workflow state.
+        actionInFlight = true
         val error = service.startImageWatch(target)
         if (error != null) {
+            actionInFlight = false
             failLocked(error, step)
             return
         }
-        actionInFlight = true
         setStatus(statusFor("waiting", step))
     }
 
