@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Process
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.WorkflowStatus
 
 class AgentCommandProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
@@ -30,18 +31,28 @@ class AgentCommandProvider : ContentProvider() {
     }
 
     private fun statusCursor(): Cursor {
-        val status = AgentRuntime.status
+        val runtime = AgentRuntime.status
+        val service = GenericAccessibilityService.instance
+        val workflow = service?.workflowStatus() ?: WorkflowStatus()
         return MatrixCursor(STATUS_COLUMNS).apply {
             addRow(
                 arrayOf(
-                    status.connected,
-                    status.packageName,
-                    status.nodeCount,
-                    status.generation,
-                    status.lastEvent,
-                    GenericAccessibilityService.instance != null,
+                    runtime.connected,
+                    runtime.packageName,
+                    runtime.nodeCount,
+                    runtime.generation,
+                    runtime.lastEvent,
+                    service != null,
                     true,
-                    false
+                    false,
+                    workflow.state,
+                    workflow.stepIndex,
+                    workflow.stepCount,
+                    workflow.command,
+                    workflow.target,
+                    workflow.error,
+                    service?.socketState() ?: "disconnected",
+                    service?.socketUrl()
                 )
             )
         }
@@ -59,6 +70,7 @@ class AgentCommandProvider : ContentProvider() {
                     node.top,
                     node.right,
                     node.bottom,
+                    node.enabled,
                     node.clickable,
                     node.parentKey,
                     node.key
@@ -70,29 +82,76 @@ class AgentCommandProvider : ContentProvider() {
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         enforceLocalCaller()
         val service = GenericAccessibilityService.instance
+            ?: return result(false, "accessibility_service_not_connected")
 
-        if (service == null) {
-            return Bundle().apply {
-                putBoolean("success", false)
-                putString("error", "accessibility_service_not_connected")
+        return when (method.lowercase()) {
+            "click", "click_text" -> {
+                val success = arg != null && service.clickText(arg)
+                result(success, if (success) null else "command_not_applied")
             }
-        }
 
-        val success = when (method) {
-            "swipe" -> arg != null && service.swipe(arg)
-            "click_text" -> arg != null && service.clickText(arg)
-            "auto" -> false
-            else -> false
-        }
-
-        return Bundle().apply {
-            putBoolean("success", success)
-            when {
-                method == "auto" -> putString("error", "auto_actions_disabled")
-                method != "swipe" && method != "click_text" -> putString("error", "unsupported_command")
-                !success -> putString("error", "command_not_applied")
+            "swipe" -> {
+                val success = arg != null && service.swipe(arg)
+                result(success, if (success) null else "command_not_applied")
             }
+
+            "up" -> {
+                val success = service.swipe("up")
+                result(success, if (success) null else "command_not_applied")
+            }
+
+            "down" -> {
+                val success = service.swipe("down")
+                result(success, if (success) null else "command_not_applied")
+            }
+
+            "wait" -> {
+                if (arg.isNullOrBlank()) return result(false, "WAIT_requires_target")
+                workflowResult(service.runWorkflow("WAIT:$arg"))
+            }
+
+            "workflow", "workflow_run" -> {
+                if (arg.isNullOrBlank()) return result(false, "empty_workflow")
+                workflowResult(service.runWorkflow(arg))
+            }
+
+            "workflow_stop" -> workflowResult(service.stopWorkflow())
+
+            "socket_connect" -> {
+                if (arg.isNullOrBlank()) return result(false, "socket_url_required")
+                val success = service.connectSocket(arg)
+                result(success, if (success) null else "invalid_socket_url").apply {
+                    putString("socket_state", service.socketState())
+                    putString("socket_url", service.socketUrl())
+                }
+            }
+
+            "socket_disconnect" -> {
+                service.disconnectSocket(clearSavedUrl = true)
+                result(true).apply {
+                    putString("socket_state", service.socketState())
+                }
+            }
+
+            "auto" -> result(false, "auto_actions_disabled")
+            else -> result(false, "unsupported_command")
         }
+    }
+
+    private fun workflowResult(status: WorkflowStatus): Bundle {
+        val success = status.state != "failed"
+        return result(success, status.error).apply {
+            putString("workflow_state", status.state)
+            putInt("workflow_step", status.stepIndex)
+            putInt("workflow_total", status.stepCount)
+            putString("workflow_command", status.command)
+            putString("workflow_target", status.target)
+        }
+    }
+
+    private fun result(success: Boolean, error: String? = null): Bundle = Bundle().apply {
+        putBoolean("success", success)
+        if (error != null) putString("error", error)
     }
 
     private fun enforceLocalCaller() {
@@ -116,7 +175,15 @@ class AgentCommandProvider : ContentProvider() {
             "last_event",
             "service_connected",
             "click_actions_enabled",
-            "auto_actions_enabled"
+            "auto_actions_enabled",
+            "workflow_state",
+            "workflow_step",
+            "workflow_total",
+            "workflow_command",
+            "workflow_target",
+            "workflow_error",
+            "socket_state",
+            "socket_url"
         )
 
         private val NODE_COLUMNS = arrayOf(
@@ -128,6 +195,7 @@ class AgentCommandProvider : ContentProvider() {
             "top",
             "right",
             "bottom",
+            "enabled",
             "clickable",
             "parent_key",
             "key"
