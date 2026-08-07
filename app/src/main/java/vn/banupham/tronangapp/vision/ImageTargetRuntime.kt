@@ -17,6 +17,12 @@ import kotlin.math.min
  * Only one image target is watched at a time because a workflow executes one
  * step at a time. The matcher samples a small grid of template pixels and
  * scans only the configured ROI, keeping the hot path small.
+ *
+ * Repeated watches use the last successful position as a temporal hint. A
+ * stable UI element can therefore be verified with one tiny probe instead of
+ * rescanning the entire ROI on every /find call. If the element moved a few
+ * pixels, a small local refinement is attempted before falling back to the
+ * normal coarse ROI scan.
  */
 object ImageTargetRuntime {
     data class ImageTarget(
@@ -52,6 +58,7 @@ object ImageTargetRuntime {
     )
 
     private val targets = ConcurrentHashMap<String, ImageTarget>()
+    private val lastSuccessfulMatches = ConcurrentHashMap<String, ImageMatch>()
 
     @Volatile
     private var activeWatch: String? = null
@@ -103,7 +110,11 @@ object ImageTargetRuntime {
                 roiBottom = roiBottom,
                 threshold = safeThreshold
             )
-            targets[normalizeName(cleanName)] = target
+            val key = normalizeName(cleanName)
+            targets[key] = target
+            // A newly uploaded template/ROI may represent a different visual or
+            // search area, so never reuse a position learned from the old one.
+            lastSuccessfulMatches.remove(key)
             target
         } finally {
             bitmap.recycle()
@@ -113,6 +124,7 @@ object ImageTargetRuntime {
     fun remove(name: String): Boolean {
         val key = normalizeName(name)
         if (activeWatch == key) activeWatch = null
+        lastSuccessfulMatches.remove(key)
         return targets.remove(key) != null
     }
 
@@ -137,11 +149,18 @@ object ImageTargetRuntime {
             return
         }
 
-        val match = findMatch(image, screenWidth, screenHeight, target) ?: return
+        val match = findMatch(
+            image = image,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            target = target,
+            hint = lastSuccessfulMatches[key]
+        ) ?: return
 
         // One match completes the current image wait. A following workflow step
         // may arm another watch immediately.
         activeWatch = null
+        lastSuccessfulMatches[key] = match
         lastMatch = match
         onMatch?.invoke(match)
     }
@@ -150,7 +169,8 @@ object ImageTargetRuntime {
         image: Image,
         screenWidth: Int,
         screenHeight: Int,
-        target: ImageTarget
+        target: ImageTarget,
+        hint: ImageMatch?
     ): ImageMatch? {
         val plane = image.planes.firstOrNull() ?: return null
         val pixelStride = plane.pixelStride
@@ -171,6 +191,26 @@ object ImageTargetRuntime {
         val buffer = plane.buffer
         val maxDiff = target.samples.size.toLong() * 3L * 255L
         val allowedDiff = ((1.0 - target.threshold) * maxDiff).toLong().coerceAtLeast(1L)
+
+        // Fast path for repeated /find calls. UI elements normally stay in the
+        // same place, so verify the previously successful coordinate first.
+        // This turns a full ROI scan into at most 64 sampled pixel comparisons.
+        if (hint != null) {
+            val hintedMatch = findNearHint(
+                buffer = buffer,
+                rowStride = rowStride,
+                pixelStride = pixelStride,
+                target = target,
+                hint = hint,
+                roiLeft = roiLeft,
+                roiTop = roiTop,
+                maxX = maxX,
+                maxY = maxY,
+                maxDiff = maxDiff,
+                allowedDiff = allowedDiff
+            )
+            if (hintedMatch != null) return hintedMatch
+        }
 
         var bestX = -1
         var bestY = -1
@@ -232,17 +272,98 @@ object ImageTargetRuntime {
             y++
         }
 
-        val score = 1.0 - (bestDiff.toDouble() / maxDiff.toDouble())
-        if (score < target.threshold) return null
+        if (bestDiff > allowedDiff) return null
+        return buildMatch(target, bestX, bestY, bestDiff, maxDiff)
+    }
 
+    private fun findNearHint(
+        buffer: java.nio.ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        target: ImageTarget,
+        hint: ImageMatch,
+        roiLeft: Int,
+        roiTop: Int,
+        maxX: Int,
+        maxY: Int,
+        maxDiff: Long,
+        allowedDiff: Long
+    ): ImageMatch? {
+        val hintX = hint.left
+        val hintY = hint.top
+
+        if (hintX in roiLeft..maxX && hintY in roiTop..maxY) {
+            val directDiff = sampleDifference(
+                buffer = buffer,
+                rowStride = rowStride,
+                pixelStride = pixelStride,
+                originX = hintX,
+                originY = hintY,
+                samples = target.samples,
+                abortAbove = allowedDiff
+            )
+            if (directDiff <= allowedDiff) {
+                return buildMatch(target, hintX, hintY, directDiff, maxDiff)
+            }
+        }
+
+        // The element may have shifted slightly because of animation, insets or
+        // layout jitter. Search only a tiny neighborhood before doing the full ROI.
+        val left = max(roiLeft, hintX - HINT_RADIUS)
+        val top = max(roiTop, hintY - HINT_RADIUS)
+        val right = min(maxX, hintX + HINT_RADIUS)
+        val bottom = min(maxY, hintY + HINT_RADIUS)
+        if (left > right || top > bottom) return null
+
+        var bestX = -1
+        var bestY = -1
+        var bestDiff = allowedDiff + 1L
+
+        var y = top
+        while (y <= bottom) {
+            var x = left
+            while (x <= right) {
+                if (x != hintX || y != hintY) {
+                    val diff = sampleDifference(
+                        buffer = buffer,
+                        rowStride = rowStride,
+                        pixelStride = pixelStride,
+                        originX = x,
+                        originY = y,
+                        samples = target.samples,
+                        abortAbove = min(bestDiff, allowedDiff)
+                    )
+                    if (diff < bestDiff) {
+                        bestDiff = diff
+                        bestX = x
+                        bestY = y
+                    }
+                }
+                x++
+            }
+            y++
+        }
+
+        if (bestX < 0 || bestDiff > allowedDiff) return null
+        return buildMatch(target, bestX, bestY, bestDiff, maxDiff)
+    }
+
+    private fun buildMatch(
+        target: ImageTarget,
+        x: Int,
+        y: Int,
+        diff: Long,
+        maxDiff: Long
+    ): ImageMatch {
+        val score = 1.0 - (diff.toDouble() / maxDiff.toDouble())
         return ImageMatch(
             name = target.name,
-            left = bestX,
-            top = bestY,
-            right = bestX + target.width,
-            bottom = bestY + target.height,
-            centerX = bestX + target.width / 2,
-            centerY = bestY + target.height / 2,
+            left = x,
+            top = y,
+            right = x + target.width,
+            bottom = y + target.height,
+            centerX = x + target.width / 2,
+            centerY = y + target.height / 2,
             score = score,
             timestampMs = SystemClock.elapsedRealtime()
         )
@@ -307,4 +428,5 @@ object ImageTargetRuntime {
 
     private const val SAMPLE_GRID = 8
     private const val COARSE_STRIDE = 2
+    private const val HINT_RADIUS = 4
 }
