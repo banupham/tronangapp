@@ -7,6 +7,7 @@ import vn.banupham.tronangapp.vision.ImageTargetRuntime
 
 sealed class WorkflowStep {
     data class Click(val target: String) : WorkflowStep()
+    data class Tap(val x: Int, val y: Int) : WorkflowStep()
     data class Wait(val target: String) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
@@ -201,6 +202,11 @@ class WorkflowEngine(
                     index++
                 }
 
+                is WorkflowStep.Tap -> {
+                    startTapLocked(step)
+                    return
+                }
+
                 WorkflowStep.Up -> {
                     startSwipeLocked("up", step)
                     return
@@ -265,6 +271,19 @@ class WorkflowEngine(
             )
         )
         currentRequestId = null
+    }
+
+    private fun startTapLocked(step: WorkflowStep.Tap) {
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("running", step))
+        val started = service.tapForWorkflow(step.x, step.y) { success ->
+            onAsyncActionFinished(token, success, step, "tap_cancelled")
+        }
+        if (!started) {
+            actionInFlight = false
+            failLocked("tap_not_started", step)
+        }
     }
 
     private fun startSwipeLocked(direction: String, step: WorkflowStep) {
@@ -371,6 +390,7 @@ class WorkflowEngine(
 
     private fun commandName(step: WorkflowStep): String = when (step) {
         is WorkflowStep.Click -> "CLICK"
+        is WorkflowStep.Tap -> "TAP"
         is WorkflowStep.Wait -> "WAIT"
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
@@ -384,6 +404,7 @@ class WorkflowEngine(
 
     private fun targetOf(step: WorkflowStep): String? = when (step) {
         is WorkflowStep.Click -> step.target
+        is WorkflowStep.Tap -> "${step.x},${step.y}"
         is WorkflowStep.Wait -> step.target
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.WaitImage -> step.target
@@ -418,6 +439,21 @@ class WorkflowEngine(
                     "CLICK" -> {
                         require(argument.isNotEmpty()) { "CLICK_requires_target" }
                         WorkflowStep.Click(argument)
+                    }
+
+                    "TAP", "CLICK_XY", "CLICKXY" -> {
+                        val coordinateParts = argument
+                            .replace(' ', ',')
+                            .split(',')
+                            .map(String::trim)
+                            .filter(String::isNotEmpty)
+                        require(coordinateParts.size == 2) { "TAP_requires_x_y" }
+                        val x = coordinateParts[0].toIntOrNull()
+                            ?: throw IllegalArgumentException("TAP_invalid_x")
+                        val y = coordinateParts[1].toIntOrNull()
+                            ?: throw IllegalArgumentException("TAP_invalid_y")
+                        require(x >= 0 && y >= 0) { "TAP_coordinates_must_be_non_negative" }
+                        WorkflowStep.Tap(x, y)
                     }
 
                     "WAIT", "CHO", "CHỜ" -> {
