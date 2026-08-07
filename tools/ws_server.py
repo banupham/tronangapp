@@ -10,6 +10,8 @@ import websockets
 
 HOST = "0.0.0.0"
 PORT = 8765
+NETWORK_WARN_MS = 120.0
+PHONE_QUEUE_WARN_MS = 30.0
 clients = set()
 command_ids = itertools.count(1)
 pending = {}
@@ -49,12 +51,24 @@ def print_ack(obj):
     if state == "received":
         item["received_phone_ms"] = phone_ms
         extra = "  (PC send -> phone ACK round-trip)"
+        if elapsed >= NETWORK_WARN_MS:
+            extra += "  [NETWORK/SOCKET SPIKE]"
 
     elif state == "started":
         item["started_phone_ms"] = phone_ms
         received_phone_ms = item.get("received_phone_ms")
         if isinstance(phone_ms, (int, float)) and isinstance(received_phone_ms, (int, float)):
-            extra = f"  phone_queue={phone_ms - received_phone_ms:.1f} ms"
+            queue_ms = phone_ms - received_phone_ms
+            extra = f"  phone_queue={queue_ms:.1f} ms"
+            if queue_ms >= PHONE_QUEUE_WARN_MS:
+                extra += "  [MAIN/TREE QUEUE]"
+
+        tree_ms = obj.get("last_tree_scan_ms")
+        tree_age = obj.get("tree_scan_age_ms")
+        if isinstance(tree_ms, (int, float)):
+            extra += f"  last_tree_scan={tree_ms:.1f} ms"
+        if isinstance(tree_age, (int, float)):
+            extra += f"  tree_age={tree_age:.1f} ms"
 
     elif state in {"completed", "failed", "stopped", "cancelled"}:
         started_phone_ms = item.get("started_phone_ms")
@@ -199,14 +213,15 @@ async def console():
     print("  /clickimg NAME    -> CLICK_IMG:NAME")
     print("  /images           -> list image targets")
     print("  /capture          -> capture status")
-    print("  /ping              -> socket ping/pong test")
-    print("  /stop              -> stop workflow")
+    print("  /ping             -> socket ping/pong test")
+    print("  /stop             -> stop workflow")
     print()
     print("Latency ACKs:")
     print("  RECEIVED  = phone WebSocket callback received the command")
     print("  STARTED   = Android main thread started processing the workflow")
     print("  COMPLETED = workflow finished")
     print("  phone_queue shows RECEIVED -> STARTED time inside the phone")
+    print("  last_tree_scan shows the duration of the most recent full-tree rebuild")
     print()
 
     while True:
