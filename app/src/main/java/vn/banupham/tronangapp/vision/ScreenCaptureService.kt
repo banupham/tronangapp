@@ -28,7 +28,9 @@ class ScreenCaptureService : Service() {
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
     private var latestImage: Image? = null
-    private var lastProbedWatch: String? = null
+
+    /** Last startWatch generation already checked against latestImage. */
+    private var lastProbedWatchGeneration: Long = -1L
 
     private var width: Int = 0
     private var height: Int = 0
@@ -37,18 +39,31 @@ class ScreenCaptureService : Service() {
     private val cachedFrameProbe = object : Runnable {
         override fun run() {
             val handler = captureHandler ?: return
-            val watch = ImageTargetRuntime.activeWatchName()
+            try {
+                val generation = ImageTargetRuntime.activeWatchGeneration()
 
-            if (watch == null) {
-                lastProbedWatch = null
-            } else if (watch != lastProbedWatch) {
-                lastProbedWatch = watch
-                latestImage?.let { image ->
-                    ImageTargetRuntime.processFrame(image, width, height)
+                if (generation == 0L) {
+                    // No active workflow image wait. Reset so the next watch is
+                    // eligible even if it happens to use the same image name.
+                    lastProbedWatchGeneration = -1L
+                } else if (generation != lastProbedWatchGeneration) {
+                    // A unique generation is assigned on every startWatch call.
+                    // This fixes the old name-based race where repeated /find
+                    // nut_claim calls could be mistaken for the same watch and
+                    // then wait seconds for a new MediaProjection frame.
+                    lastProbedWatchGeneration = generation
+                    latestImage?.let { image ->
+                        runCatching {
+                            ImageTargetRuntime.processFrame(image, width, height)
+                        }
+                    }
+                }
+            } finally {
+                // Never let one bad/stale frame permanently kill the probe loop.
+                if (captureHandler === handler) {
+                    handler.postDelayed(this, CACHED_FRAME_PROBE_MS)
                 }
             }
-
-            handler.postDelayed(this, CACHED_FRAME_PROBE_MS)
         }
     }
 
@@ -122,7 +137,9 @@ class ScreenCaptureService : Service() {
             latestImage = image
 
             // If a workflow is already waiting, evaluate this fresh frame now.
-            ImageTargetRuntime.processFrame(image, width, height)
+            runCatching {
+                ImageTargetRuntime.processFrame(image, width, height)
+            }
         }, captureHandler)
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
@@ -137,10 +154,8 @@ class ScreenCaptureService : Service() {
         )
         running = true
 
-        // MediaProjection may not emit a new ImageReader frame while the screen
-        // is visually static. Probe the retained latest frame whenever a new
-        // image watch is armed so /find and CLICK_IMG do not wait seconds for an
-        // unrelated redraw.
+        // Probe the retained frame for every new image-watch generation. This is
+        // independent of the target name, so repeated /find calls are reliable.
         captureHandler?.post(cachedFrameProbe)
     }
 
@@ -190,7 +205,7 @@ class ScreenCaptureService : Service() {
         captureDensityDpi = 0
 
         captureHandler?.removeCallbacks(cachedFrameProbe)
-        lastProbedWatch = null
+        lastProbedWatchGeneration = -1L
         runCatching { latestImage?.close() }
         latestImage = null
 
@@ -262,7 +277,7 @@ class ScreenCaptureService : Service() {
         var captureDensityDpi: Int = 0
             private set
 
-        private const val CACHED_FRAME_PROBE_MS = 16L
+        private const val CACHED_FRAME_PROBE_MS = 8L
         private const val CHANNEL_ID = "tronangapp_capture"
         private const val NOTIFICATION_ID = 1201
     }
