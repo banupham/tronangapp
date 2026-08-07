@@ -1,6 +1,6 @@
 # HƯỚNG DẪN SỬ DỤNG TRONANGAPP
 
-Tài liệu áp dụng cho nhánh `main`, bản app `0.4.0`.
+Tài liệu áp dụng cho nhánh `main`, bản app `0.4.1`.
 
 `tronangapp` dùng Accessibility + WebSocket để chạy workflow trên Android. App hỗ trợ thao tác theo text trong Accessibility tree, thao tác hệ thống, nghỉ theo thời gian và tìm/click ảnh trong một ROI đã biết trước.
 
@@ -138,27 +138,17 @@ Ping socket:
 /ping
 ```
 
-## 6. ACK và đo độ trễ từ bản 0.4.0
+## 6. ACK và đo độ trễ
 
-Mỗi workflow gửi từ `tools/ws_server.py` được gắn một ID, ví dụ:
+Mỗi workflow gửi từ `tools/ws_server.py` có một ID, ví dụ `pc-1`.
 
-```text
-pc-1
-```
-
-Ví dụ gửi:
-
-```text
-UP
-```
-
-console có thể hiển thị:
+Ví dụ:
 
 ```text
 [pc-1] SEND       UP
-[pc-1] RECEIVED   +     5.8 ms  (PC send -> phone ACK round-trip)
-[pc-1] STARTED    +     7.2 ms  phone_queue=1.0 ms
-[pc-1] COMPLETED  +   360.5 ms  phone_execute=353.0 ms
+[pc-1] RECEIVED   +     8.0 ms  (PC send -> phone ACK round-trip)
+[pc-1] STARTED    +    10.0 ms  phone_queue=1.0 ms  last_tree_scan=12.0 ms  tree_age=210.0 ms
+[pc-1] COMPLETED  +   365.0 ms  phone_execute=354.0 ms
 ```
 
 Ý nghĩa:
@@ -177,7 +167,7 @@ COMPLETED
   workflow đã hoàn thành
 ```
 
-`phone_queue` được tính hoàn toàn bằng đồng hồ monotonic trên điện thoại:
+`phone_queue` được tính bằng đồng hồ monotonic trên điện thoại:
 
 ```text
 STARTED.phone_ms - RECEIVED.phone_ms
@@ -191,53 +181,79 @@ Cách đọc kết quả:
 SEND -> RECEIVED cao
 => nghi mạng / Wi-Fi / WebSocket
 
-RECEIVED -> STARTED (phone_queue) cao
-=> nghi Android main thread bị nghẽn
+phone_queue cao
+=> nghi Android main thread / tree đang bận
 
-STARTED -> COMPLETED cao
-=> thao tác/gesture/workflow đang mất thời gian
+phone_execute cao
+=> thao tác/gesture/workflow mất thời gian
 ```
 
-Lưu ý: `UP` và `DOWN` hiện dùng gesture khoảng `350 ms`, nên `phone_execute` quanh mức này là bình thường.
+`UP` và `DOWN` hiện dùng gesture khoảng `350 ms`, nên `phone_execute` quanh `350-380 ms` là bình thường.
 
-## 7. Tối ưu Accessibility tree từ bản 0.4.0
+Server 0.4.1 tự đánh dấu:
 
-Bản cũ rebuild toàn bộ Accessibility tree sau gần như mỗi event. Khi app mục tiêu phát nhiều event, việc này có thể làm main thread bận và khiến lệnh socket chờ.
+```text
+[NETWORK/SOCKET SPIKE]
+```
 
-Bản 0.4.0 đổi thành:
+nếu `SEND -> RECEIVED` vượt khoảng `120 ms`, và:
+
+```text
+[MAIN/TREE QUEUE]
+```
+
+nếu `phone_queue` vượt khoảng `30 ms`.
+
+## 7. Tối ưu TREE từ bản 0.4.1
+
+Bản cũ có thể rebuild full Accessibility tree quá sớm trong lúc UI đang scroll/animate.
+
+Bản `0.4.1` dùng:
 
 ```text
 Accessibility event
         |
         +--> FAST PATH: kiểm tra event.source ngay cho WAIT
         |
-        +--> full-tree snapshot được gom event (coalesce)
-             và rebuild sau một khoảng ngắn
+        +--> full tree được DEBOUNCE
+             đợi event lắng xuống rồi mới rebuild
 ```
 
-Full tree hiện được coalesce khoảng `40 ms`, thay vì cố rebuild cho mọi event liên tiếp.
+Thông số hiện tại:
 
-Đặc biệt workflow:
+```text
+debounce tree      = 120 ms
+command grace      = 150 ms
+max tree stale     = 500 ms
+```
+
+Nếu event tiếp tục dồn dập, tree bị đẩy lùi nhưng tối đa khoảng 500 ms sẽ refresh một lần để RAM index không quá cũ.
+
+Lệnh socket realtime được đưa lên đầu main queue bằng `postAtFrontOfQueue`, nên `UP`, `DOWN`, `BACK`, `HOME`, `RECENTS` không phải đứng sau một snapshot tree chỉ đang chờ trong queue.
+
+Workflow:
 
 ```text
 WAIT:Tiếp tục;CLICK:Tiếp tục
 ```
 
-nếu event source chứa đúng target, app có thể kiểm tra và click trực tiếp từ subtree nhỏ trước khi full-tree snapshot chạy.
+vẫn có fast path từ `event.source`, nên không phải chờ full-tree rebuild để phản ứng.
 
-Các lệnh không cần tree như:
+## 8. Tối ưu mạng từ bản 0.4.1
+
+Khi WebSocket đang connected, app giữ Wi-Fi ở chế độ ưu tiên độ trễ phù hợp với phiên bản Android và giảm heartbeat WebSocket từ 20 giây xuống còn 5 giây.
+
+Mục tiêu là giảm các spike kiểu:
 
 ```text
-UP
-DOWN
-BACK
-HOME
-RECENTS
+SEND -> RECEIVED = 300-500 ms
 ```
 
-không phụ thuộc nội dung tree để quyết định thao tác.
+trong khi các lần bình thường chỉ khoảng vài đến vài chục ms.
 
-## 8. CLICK và WAIT theo Accessibility
+Wi-Fi performance lock chỉ được giữ khi socket connected và được thả khi disconnect/failure. Đổi lại thiết bị có thể tốn pin hơn trong lúc kết nối realtime.
+
+## 9. CLICK và WAIT theo Accessibility
 
 `CLICK:text` và `WAIT:text` không dùng ảnh.
 
@@ -247,29 +263,15 @@ Xem tree hiện tại:
 adb shell content query --uri content://vn.banupham.tronangapp.commands/nodes
 ```
 
-App bỏ qua hoa/thường và khoảng trắng khi so khớp. Ví dụ:
+App bỏ qua hoa/thường và khoảng trắng khi so khớp.
 
-```text
-Новое сообщение
-новоесообщение
-Новое    сообщение
-```
+Nếu target không tồn tại trong Accessibility tree thì dùng `CLICK_IMG`.
 
-được chuẩn hóa để so khớp tương đương.
-
-Nếu target không tồn tại trong Accessibility tree, dùng tìm ảnh.
-
-## 9. Tìm ảnh qua socket
+## 10. Tìm ảnh qua socket
 
 Ảnh mẫu phải được nạp trước. Tên như `nut_claim` chỉ là tên khóa do người dùng đặt, không phải node trong Accessibility tree.
 
-Ví dụ có file:
-
-```text
-C:\anh\claim.png
-```
-
-Nạp vào điện thoại:
+Ví dụ:
 
 ```text
 /img nut_claim "C:\anh\claim.png" 700 1400 1050 1800 0.90
@@ -292,7 +294,7 @@ THRESHOLD  = ngưỡng giống, ví dụ 0.90
 
 Ảnh được gửi một lần qua socket, Android giải mã và giữ target trong RAM.
 
-## 10. Chờ hoặc click ảnh
+## 11. Chờ hoặc click ảnh
 
 Chỉ chờ:
 
@@ -318,19 +320,7 @@ shortcut:
 /clickimg nut_claim
 ```
 
-Nếu mục tiêu là phản ứng nhanh, ưu tiên:
-
-```text
-CLICK_IMG:nut_claim
-```
-
-thay vì:
-
-```text
-WAIT_IMG:nut_claim;CLICK_IMG:nut_claim
-```
-
-vì `CLICK_IMG` giữ luôn tọa độ vừa match và click ngay.
+Nếu mục tiêu là phản ứng nhanh, ưu tiên `CLICK_IMG:name` thay vì `WAIT_IMG:name;CLICK_IMG:name`.
 
 Xem ảnh đã nạp:
 
@@ -346,7 +336,7 @@ Xem trạng thái capture:
 
 Ảnh mẫu hiện chỉ giữ trong RAM; nếu process app bị kill/restart thì gửi `/img ...` lại.
 
-## 11. Ví dụ workflow hoàn chỉnh
+## 12. Ví dụ workflow hoàn chỉnh
 
 Nạp ảnh:
 
@@ -354,25 +344,13 @@ Nạp ảnh:
 /img nut_claim "C:\anh\claim.png" 700 1400 1050 1800 0.90
 ```
 
-Sau đó chạy:
+Sau đó:
 
 ```text
 WAIT:Nhận thưởng;CLICK:Nhận thưởng;SLEEP:0.15;CLICK_IMG:nut_claim;BACK;HOME
 ```
 
-Ví dụ chỉ dùng text:
-
-```text
-WAIT:Tiếp tục;CLICK:Tiếp tục;SLEEP:0.1;DOWN
-```
-
-Ví dụ chỉ dùng ảnh:
-
-```text
-CLICK_IMG:nut_claim;SLEEP:0.1;CLICK_IMG:nut_ok
-```
-
-## 12. ADB kiểm tra nhanh
+## 13. ADB kiểm tra nhanh
 
 Status:
 
@@ -406,59 +384,55 @@ Sleep:
 adb shell content call --uri content://vn.banupham.tronangapp.commands --method sleep --arg "0.5"
 ```
 
-## 13. Lỗi thường gặp
+## 14. Lỗi thường gặp
 
-### `image_target_not_registered`
+`image_target_not_registered`: chưa gửi `/img ...` cho target đó.
 
-Chưa gửi `/img ...` cho target đó.
+`screen_capture_not_running`: mở app và bật `Bật chụp màn hình / tìm ảnh`.
 
-### `screen_capture_not_running`
+Socket không kết nối: kiểm tra IP bằng `ipconfig`, Windows Firewall và khả năng PC/điện thoại truy cập nhau.
 
-Mở app và bật `Bật chụp màn hình / tìm ảnh`.
+`CLICK:text` không tìm thấy: kiểm tra `/nodes`; nếu target không có trong Accessibility tree thì dùng `CLICK_IMG`.
 
-### Socket không kết nối
+Tìm ảnh sai hoặc không ra: crop ảnh mẫu sát target, thu nhỏ ROI và điều chỉnh threshold.
 
-Kiểm tra IP bằng `ipconfig`, Windows Firewall và khả năng PC/điện thoại truy cập nhau.
-
-### `CLICK:text` không tìm thấy
-
-Kiểm tra `/nodes`; nếu target không có trong Accessibility tree thì dùng `CLICK_IMG`.
-
-### Tìm ảnh sai hoặc không ra
-
-Crop ảnh mẫu sát target, thu nhỏ ROI và điều chỉnh threshold. Ví dụ thử `0.92`, `0.95` nếu match nhầm; hoặc giảm từ `0.90` xuống `0.85` nếu ảnh thật có biến đổi nhỏ.
-
-## 14. Bảo mật
+## 15. Bảo mật
 
 `ws://` chỉ nên dùng để test trong LAN.
 
 Không expose WebSocket chưa xác thực trực tiếp ra Internet. Khi triển khai Internet nên dùng `wss://` và bổ sung token/xác thực thiết bị.
 
-## 15. Quy trình test độ nghẽn khuyến nghị
+## 16. Quy trình test nghẽn sau nâng cấp
 
-Chạy server mới:
+Cập nhật code PC:
 
 ```cmd
+git pull origin main
 python tools\ws_server.py
 ```
 
-Sau đó gửi liên tiếp từng lệnh, chờ mỗi lệnh hoàn thành:
+Cài APK `0.4.1`, bật Accessibility rồi gửi từng lệnh, chờ hoàn thành trước khi gửi lệnh tiếp:
 
 ```text
 UP
-DOWN
 UP
-DOWN
+UP
+UP
+UP
 ```
 
-Đọc `RECEIVED`, `phone_queue` và `phone_execute` để xác định:
+Gửi lại log gồm:
 
 ```text
-mạng chậm
-hay
-Android main thread/tree chậm
-hay
-gesture tự nó mất thời gian
+RECEIVED
+STARTED + phone_queue + last_tree_scan + tree_age
+COMPLETED + phone_execute
 ```
 
-Đây là cách chuẩn để chẩn đoán từ bản `0.4.0`, thay vì chỉ nhìn thời điểm màn hình đã vuốt hay chưa.
+Từ đó có thể tách rõ:
+
+```text
+mạng / Wi-Fi / socket
+main thread / tree
+gesture Android
+```
