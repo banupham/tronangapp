@@ -11,6 +11,8 @@ import android.os.Process
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.WorkflowStatus
+import vn.banupham.tronangapp.vision.ImageTargetRuntime
+import vn.banupham.tronangapp.vision.ScreenCaptureService
 
 class AgentCommandProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
@@ -52,7 +54,10 @@ class AgentCommandProvider : ContentProvider() {
                     workflow.target,
                     workflow.error,
                     service?.socketState() ?: "disconnected",
-                    service?.socketUrl()
+                    service?.socketUrl(),
+                    ScreenCaptureService.running,
+                    ImageTargetRuntime.targetCount(),
+                    ImageTargetRuntime.activeWatchName()
                 )
             )
         }
@@ -105,9 +110,29 @@ class AgentCommandProvider : ContentProvider() {
                 result(success, if (success) null else "command_not_applied")
             }
 
+            "back" -> {
+                val success = service.performSystemAction("back")
+                result(success, if (success) null else "command_not_applied")
+            }
+
+            "home" -> {
+                val success = service.performSystemAction("home")
+                result(success, if (success) null else "command_not_applied")
+            }
+
+            "recents", "recent" -> {
+                val success = service.performSystemAction("recents")
+                result(success, if (success) null else "command_not_applied")
+            }
+
             "wait" -> {
                 if (arg.isNullOrBlank()) return result(false, "WAIT_requires_target")
                 workflowResult(service.runWorkflow("WAIT:$arg"))
+            }
+
+            "sleep" -> {
+                if (arg.isNullOrBlank()) return result(false, "SLEEP_requires_seconds")
+                workflowResult(service.runWorkflow("SLEEP:$arg"))
             }
 
             "workflow", "workflow_run" -> {
@@ -183,7 +208,10 @@ class AgentCommandProvider : ContentProvider() {
             "workflow_target",
             "workflow_error",
             "socket_state",
-            "socket_url"
+            "socket_url",
+            "capture_running",
+            "image_targets",
+            "image_watch"
         )
 
         private val NODE_COLUMNS = arrayOf(
