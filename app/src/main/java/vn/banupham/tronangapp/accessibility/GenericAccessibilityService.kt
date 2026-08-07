@@ -99,6 +99,35 @@ class GenericAccessibilityService : AccessibilityService() {
         )
     }
 
+    fun clickText(requestedText: String): Boolean {
+        val expected = normalize(requestedText)
+        if (expected.isBlank()) return false
+
+        val root = rootInActiveWindow ?: return false
+        return root.findAccessibilityNodeInfosByText(requestedText)
+            .asSequence()
+            .filter { it.isVisibleToUser }
+            .filter { node ->
+                normalize(listOfNotNull(node.text, node.contentDescription).joinToString(" ")) == expected
+            }
+            .mapNotNull(::clickableNode)
+            .firstOrNull { it.performAction(AccessibilityNodeInfo.ACTION_CLICK) } != null
+    }
+
+    private fun clickableNode(start: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = start
+        repeat(MAX_CLICK_PARENT_DEPTH) {
+            if (current?.isClickable == true) return current
+            current = current?.parent
+        }
+        return null
+    }
+
+    private fun normalize(value: String): String = value
+        .trim()
+        .lowercase()
+        .replace(Regex("\\s+"), " ")
+
     override fun onInterrupt() {
         AgentRuntime.disconnect()
     }
@@ -117,5 +146,6 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val SWIPE_DURATION_MS = 350L
         private const val MAX_NODES = 10_000
         private const val MAX_DEPTH = 100
+        private const val MAX_CLICK_PARENT_DEPTH = 5
     }
 }
