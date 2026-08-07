@@ -1,6 +1,8 @@
 package vn.banupham.tronangapp.remote
 
 import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import java.util.ArrayDeque
@@ -19,9 +21,13 @@ class RemoteSocketClient(
     private val preferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val handler = Handler(Looper.getMainLooper())
     private val client = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
+        // A shorter WebSocket heartbeat keeps the TCP/Wi-Fi path warm for an
+        // interactive control channel instead of letting it sit idle for 20s.
+        .pingInterval(SOCKET_PING_SECONDS, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
+
+    private val wifiLock: WifiManager.WifiLock? = createRealtimeWifiLock()
 
     @Volatile
     var state: String = "disconnected"
@@ -73,6 +79,7 @@ class RemoteSocketClient(
         val oldSocket = webSocket
         webSocket = null
         oldSocket?.cancel()
+        releaseWifiLockLocked()
         openSocketLocked()
         return true
     }
@@ -87,6 +94,7 @@ class RemoteSocketClient(
         oldSocket?.close(1000, "client_disconnect")
         state = "disconnected"
         pendingMessages.clear()
+        releaseWifiLockLocked()
         if (clearSavedUrl) {
             preferences.edit().remove(KEY_URL).apply()
             url = null
@@ -139,6 +147,38 @@ class RemoteSocketClient(
         reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(15_000L)
     }
 
+    /**
+     * Android 10-13: HIGH_PERF keeps Wi-Fi out of power-save mode, which is
+     * useful for a low-bandwidth but latency-sensitive socket. Android 14+
+     * uses the newer LOW_LATENCY mode.
+     */
+    @Suppress("DEPRECATION")
+    private fun createRealtimeWifiLock(): WifiManager.WifiLock? = runCatching {
+        val manager = appContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val mode = if (Build.VERSION.SDK_INT >= 34) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        manager.createWifiLock(mode, WIFI_LOCK_TAG).apply {
+            setReferenceCounted(false)
+        }
+    }.getOrNull()
+
+    private fun acquireWifiLockLocked() {
+        val lock = wifiLock ?: return
+        if (!lock.isHeld) {
+            runCatching { lock.acquire() }
+        }
+    }
+
+    private fun releaseWifiLockLocked() {
+        val lock = wifiLock ?: return
+        if (lock.isHeld) {
+            runCatching { lock.release() }
+        }
+    }
+
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             synchronized(this@RemoteSocketClient) {
@@ -149,6 +189,7 @@ class RemoteSocketClient(
                 state = "connected"
                 reconnectDelayMs = 1_000L
                 reconnectScheduled = false
+                acquireWifiLockLocked()
                 webSocket.send("{\"type\":\"ready\",\"source\":\"tronangapp\"}")
                 flushPendingLocked(webSocket)
             }
@@ -170,6 +211,7 @@ class RemoteSocketClient(
                 if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
                 this@RemoteSocketClient.webSocket = null
+                releaseWifiLockLocked()
                 scheduleReconnectLocked()
             }
         }
@@ -179,6 +221,7 @@ class RemoteSocketClient(
                 if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
                 this@RemoteSocketClient.webSocket = null
+                releaseWifiLockLocked()
                 scheduleReconnectLocked()
             }
         }
@@ -188,5 +231,7 @@ class RemoteSocketClient(
         private const val PREFS_NAME = "remote_socket"
         private const val KEY_URL = "url"
         private const val MAX_PENDING_MESSAGES = 200
+        private const val SOCKET_PING_SECONDS = 5L
+        private const val WIFI_LOCK_TAG = "tronangapp:realtime_socket"
     }
 }
