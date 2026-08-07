@@ -17,6 +17,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.util.DisplayMetrics
+import android.view.WindowManager
 
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -65,10 +67,13 @@ class ScreenCaptureService : Service() {
     private fun startProjection(resultCode: Int, resultData: Intent) {
         stopProjection()
 
-        val metrics = resources.displayMetrics
-        width = metrics.widthPixels
-        height = metrics.heightPixels
-        densityDpi = metrics.densityDpi
+        val captureMetrics = resolveCaptureMetrics()
+        width = captureMetrics.widthPixels
+        height = captureMetrics.heightPixels
+        densityDpi = captureMetrics.densityDpi
+        captureWidth = width
+        captureHeight = height
+        captureDensityDpi = densityDpi
 
         captureThread = HandlerThread("tronangapp-screen-capture").also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
@@ -108,8 +113,50 @@ class ScreenCaptureService : Service() {
         running = true
     }
 
+    /**
+     * MediaProjection must use the real logical display bounds, not the
+     * compatibility-adjusted Resources.displayMetrics of this app process.
+     * This keeps image-match coordinates in the same coordinate system used by
+     * Accessibility gestures and `adb shell input tap` when `wm size` has an
+     * override (for example 1080x1920 on a 1440x2560 physical panel).
+     */
+    private fun resolveCaptureMetrics(): DisplayMetrics {
+        val metrics = DisplayMetrics()
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            metrics.widthPixels = bounds.width()
+            metrics.heightPixels = bounds.height()
+            metrics.densityDpi = resources.configuration.densityDpi
+            metrics.density = resources.displayMetrics.density
+            metrics.scaledDensity = resources.displayMetrics.scaledDensity
+            metrics.xdpi = resources.displayMetrics.xdpi
+            metrics.ydpi = resources.displayMetrics.ydpi
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+        }
+
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+            val fallback = resources.displayMetrics
+            metrics.widthPixels = fallback.widthPixels
+            metrics.heightPixels = fallback.heightPixels
+            metrics.densityDpi = fallback.densityDpi
+            metrics.density = fallback.density
+            metrics.scaledDensity = fallback.scaledDensity
+            metrics.xdpi = fallback.xdpi
+            metrics.ydpi = fallback.ydpi
+        }
+
+        return metrics
+    }
+
     private fun stopProjection() {
         running = false
+        captureWidth = 0
+        captureHeight = 0
+        captureDensityDpi = 0
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
         runCatching { imageReader?.close() }
@@ -164,6 +211,18 @@ class ScreenCaptureService : Service() {
 
         @Volatile
         var running: Boolean = false
+            private set
+
+        @Volatile
+        var captureWidth: Int = 0
+            private set
+
+        @Volatile
+        var captureHeight: Int = 0
+            private set
+
+        @Volatile
+        var captureDensityDpi: Int = 0
             private set
 
         private const val CHANNEL_ID = "tronangapp_capture"
