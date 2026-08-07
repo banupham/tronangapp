@@ -2,11 +2,17 @@ package vn.banupham.tronangapp.runtime
 
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.Locale
+import vn.banupham.tronangapp.accessibility.DynamicAccessibilityClick
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 
 sealed class WorkflowStep {
     data class Click(val target: String) : WorkflowStep()
+    data class ClickDescriptionRegex(
+        val className: String?,
+        val pattern: String,
+        val label: String
+    ) : WorkflowStep()
     data class Tap(val x: Int, val y: Int) : WorkflowStep()
     data class Wait(val target: String) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
@@ -202,6 +208,11 @@ class WorkflowEngine(
                     index++
                 }
 
+                is WorkflowStep.ClickDescriptionRegex -> {
+                    startDescriptionRegexClickLocked(step)
+                    return
+                }
+
                 is WorkflowStep.Tap -> {
                     startTapLocked(step)
                     return
@@ -271,6 +282,46 @@ class WorkflowEngine(
             )
         )
         currentRequestId = null
+    }
+
+    private fun startDescriptionRegexClickLocked(step: WorkflowStep.ClickDescriptionRegex) {
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("running", step))
+
+        val regex = runCatching { Regex(step.pattern) }.getOrElse {
+            actionInFlight = false
+            failLocked("description_regex_invalid", step)
+            return
+        }
+
+        when (
+            DynamicAccessibilityClick.start(
+                service = service,
+                className = step.className,
+                descriptionRegex = regex
+            ) { success ->
+                onAsyncActionFinished(token, success, step, "description_regex_tap_cancelled")
+            }
+        ) {
+            DynamicAccessibilityClick.StartResult.COMPLETED -> {
+                actionInFlight = false
+                index++
+                advanceLocked()
+            }
+
+            DynamicAccessibilityClick.StartResult.STARTED -> Unit
+
+            DynamicAccessibilityClick.StartResult.NOT_FOUND -> {
+                actionInFlight = false
+                failLocked("description_regex_target_not_found", step)
+            }
+
+            DynamicAccessibilityClick.StartResult.NOT_STARTED -> {
+                actionInFlight = false
+                failLocked("description_regex_tap_not_started", step)
+            }
+        }
     }
 
     private fun startTapLocked(step: WorkflowStep.Tap) {
@@ -390,6 +441,7 @@ class WorkflowEngine(
 
     private fun commandName(step: WorkflowStep): String = when (step) {
         is WorkflowStep.Click -> "CLICK"
+        is WorkflowStep.ClickDescriptionRegex -> step.label
         is WorkflowStep.Tap -> "TAP"
         is WorkflowStep.Wait -> "WAIT"
         is WorkflowStep.Sleep -> "SLEEP"
@@ -404,6 +456,8 @@ class WorkflowEngine(
 
     private fun targetOf(step: WorkflowStep): String? = when (step) {
         is WorkflowStep.Click -> step.target
+        is WorkflowStep.ClickDescriptionRegex ->
+            if (step.className.isNullOrBlank()) step.pattern else "${step.className}|${step.pattern}"
         is WorkflowStep.Tap -> "${step.x},${step.y}"
         is WorkflowStep.Wait -> step.target
         is WorkflowStep.Sleep -> step.seconds.toString()
@@ -424,6 +478,7 @@ class WorkflowEngine(
 
     companion object {
         private val TERMINAL_STATES = setOf("completed", "failed", "stopped", "cancelled")
+        private const val COUNTDOWN_DESCRIPTION_REGEX = "^[0-9]{1,3}:[0-5][0-9]$"
 
         fun parse(script: String): List<WorkflowStep> {
             val tokens = script
@@ -439,6 +494,42 @@ class WorkflowEngine(
                     "CLICK" -> {
                         require(argument.isNotEmpty()) { "CLICK_requires_target" }
                         WorkflowStep.Click(argument)
+                    }
+
+                    "CLICK_TIME" -> {
+                        WorkflowStep.ClickDescriptionRegex(
+                            className = argument.ifBlank { null },
+                            pattern = COUNTDOWN_DESCRIPTION_REGEX,
+                            label = "CLICK_TIME"
+                        )
+                    }
+
+                    "CLICK_DESC_REGEX" -> {
+                        require(argument.isNotEmpty()) { "CLICK_DESC_REGEX_requires_pattern" }
+                        requireValidRegex(argument, "CLICK_DESC_REGEX_invalid_pattern")
+                        WorkflowStep.ClickDescriptionRegex(
+                            className = null,
+                            pattern = argument,
+                            label = "CLICK_DESC_REGEX"
+                        )
+                    }
+
+                    "CLICK_CLASS_DESC_REGEX" -> {
+                        val separator = argument.indexOf('|')
+                        require(separator > 0 && separator < argument.length - 1) {
+                            "CLICK_CLASS_DESC_REGEX_requires_class_and_pattern"
+                        }
+                        val className = argument.substring(0, separator).trim()
+                        val pattern = argument.substring(separator + 1).trim()
+                        require(className.isNotEmpty() && pattern.isNotEmpty()) {
+                            "CLICK_CLASS_DESC_REGEX_requires_class_and_pattern"
+                        }
+                        requireValidRegex(pattern, "CLICK_CLASS_DESC_REGEX_invalid_pattern")
+                        WorkflowStep.ClickDescriptionRegex(
+                            className = className,
+                            pattern = pattern,
+                            label = "CLICK_CLASS_DESC_REGEX"
+                        )
                     }
 
                     "TAP", "CLICK_XY", "CLICKXY" -> {
@@ -508,6 +599,10 @@ class WorkflowEngine(
                     else -> throw IllegalArgumentException("unsupported_step:$command")
                 }
             }
+        }
+
+        private fun requireValidRegex(pattern: String, error: String) {
+            require(runCatching { Regex(pattern) }.isSuccess) { error }
         }
 
         private const val MAX_SLEEP_SECONDS = 3_600.0
