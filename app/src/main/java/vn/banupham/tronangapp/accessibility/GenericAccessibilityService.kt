@@ -39,9 +39,18 @@ class GenericAccessibilityService : AccessibilityService() {
     private val legacyRequestCounter = AtomicLong(0L)
 
     private var snapshotScheduled = false
+    private var snapshotBurstStartedMs = 0L
     private var pendingEventLabel: String? = null
+
+    @Volatile
+    private var lastTreeScanDurationMs = 0L
+
+    @Volatile
+    private var lastTreeScanFinishedMs = 0L
+
     private val snapshotRunnable = Runnable {
         snapshotScheduled = false
+        snapshotBurstStartedMs = 0L
         val label = pendingEventLabel
         if (refreshSnapshot(label)) {
             workflowEngine.onTreeUpdated()
@@ -92,24 +101,54 @@ class GenericAccessibilityService : AccessibilityService() {
         // Accessibility tree rebuild.
         workflowEngine.onAccessibilitySource(event?.source)
 
-        // Full-tree indexing is useful for diagnostics and generic CLICK, but
-        // rebuilding it for every event can starve socket commands. Coalesce
-        // bursts and rebuild the latest tree at most once per short window.
+        // Full-tree indexing remains useful for generic CLICK and diagnostics,
+        // but it is deliberately deferred until a burst of UI events becomes
+        // quiet. A maximum latency keeps the RAM index from becoming too old
+        // during a continuously animated/scrolling screen.
         scheduleSnapshotRefresh(label)
     }
 
     private fun scheduleSnapshotRefresh(lastEvent: String?) {
         pendingEventLabel = lastEvent
-        if (snapshotScheduled) return
-        snapshotScheduled = true
-        mainHandler.postDelayed(snapshotRunnable, TREE_REFRESH_COALESCE_MS)
+        val now = SystemClock.elapsedRealtime()
+
+        if (!snapshotScheduled) {
+            snapshotScheduled = true
+            snapshotBurstStartedMs = now
+        }
+
+        mainHandler.removeCallbacks(snapshotRunnable)
+        val burstAge = (now - snapshotBurstStartedMs).coerceAtLeast(0L)
+        val remainingUntilForced =
+            (TREE_REFRESH_MAX_LATENCY_MS - burstAge).coerceAtLeast(0L)
+        val delay = minOf(TREE_REFRESH_DEBOUNCE_MS, remainingUntilForced)
+        mainHandler.postDelayed(snapshotRunnable, delay)
+    }
+
+    /**
+     * A socket command has higher latency priority than a diagnostic full-tree
+     * rebuild. If a snapshot is waiting in the main queue, push it back a bit
+     * while preserving the maximum refresh latency.
+     */
+    private fun deferSnapshotForRealtimeCommand() {
+        if (!snapshotScheduled) return
+
+        val now = SystemClock.elapsedRealtime()
+        mainHandler.removeCallbacks(snapshotRunnable)
+        val burstAge = (now - snapshotBurstStartedMs).coerceAtLeast(0L)
+        val remainingUntilForced =
+            (TREE_REFRESH_MAX_LATENCY_MS - burstAge).coerceAtLeast(0L)
+        val delay = minOf(TREE_REFRESH_COMMAND_GRACE_MS, remainingUntilForced)
+        mainHandler.postDelayed(snapshotRunnable, delay)
     }
 
     private fun refreshSnapshot(lastEvent: String?): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
         val root = rootInActiveWindow ?: return false
         val activePackage = root.packageName?.toString()
         val output = ArrayList<NodeSnapshot>()
         val newIndex = HashMap<String, MutableList<IndexedNode>>()
+
         collectNode(
             node = root,
             parentKey = null,
@@ -118,6 +157,7 @@ class GenericAccessibilityService : AccessibilityService() {
             index = newIndex,
             depth = 0
         )
+
         liveNodeIndex = newIndex.mapValues { it.value.toList() }
         AgentRuntime.update(
             packageName = activePackage,
@@ -125,6 +165,10 @@ class GenericAccessibilityService : AccessibilityService() {
             generation = ++generation,
             lastEvent = lastEvent
         )
+
+        val finishedAt = SystemClock.elapsedRealtime()
+        lastTreeScanDurationMs = (finishedAt - startedAt).coerceAtLeast(0L)
+        lastTreeScanFinishedMs = finishedAt
         return true
     }
 
@@ -264,7 +308,7 @@ class GenericAccessibilityService : AccessibilityService() {
         if (clickFromLiveIndex(expected)) return true
 
         // Fallback for a stale index or a target that appeared since the last
-        // coalesced snapshot.
+        // deferred snapshot.
         val root = rootInActiveWindow ?: return false
         val candidates = ArrayList<ClickCandidate>()
         collectClickCandidates(root, expected, candidates, depth = 0)
@@ -485,15 +529,14 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * RECEIVED is emitted on OkHttp's WebSocket callback thread before the
-     * command is queued on Android's main looper. STARTED is emitted from the
-     * main looper immediately before WorkflowEngine starts. Their phone_ms
-     * difference therefore exposes main-thread/tree queueing independently of
-     * PC/phone clock synchronization.
+     * RECEIVED is emitted directly on OkHttp's WebSocket callback thread.
+     * STARTED is emitted from the Android main looper. postAtFrontOfQueue keeps
+     * a realtime socket command ahead of already queued diagnostic tree work.
      */
     private fun enqueueWorkflow(script: String, requestId: String) {
         remoteSocket.send(commandAckJson(requestId, "received"))
-        mainHandler.post {
+        mainHandler.postAtFrontOfQueue {
+            deferSnapshotForRealtimeCommand()
             remoteSocket.send(commandAckJson(requestId, "started"))
             runWorkflow(script, requestId)
         }
@@ -501,7 +544,8 @@ class GenericAccessibilityService : AccessibilityService() {
 
     private fun enqueueStop(requestId: String) {
         remoteSocket.send(commandAckJson(requestId, "received"))
-        mainHandler.post {
+        mainHandler.postAtFrontOfQueue {
+            deferSnapshotForRealtimeCommand()
             remoteSocket.send(commandAckJson(requestId, "started"))
             stopWorkflow()
             remoteSocket.send(commandAckJson(requestId, "completed"))
@@ -590,13 +634,21 @@ class GenericAccessibilityService : AccessibilityService() {
         requestId: String,
         state: String,
         error: String? = null
-    ): String = JSONObject().apply {
-        put("type", "ack")
-        put("id", requestId)
-        put("state", state)
-        put("phone_ms", SystemClock.elapsedRealtime())
-        if (!error.isNullOrBlank()) put("error", error)
-    }.toString()
+    ): String {
+        val now = SystemClock.elapsedRealtime()
+        return JSONObject().apply {
+            put("type", "ack")
+            put("id", requestId)
+            put("state", state)
+            put("phone_ms", now)
+            put("last_tree_scan_ms", lastTreeScanDurationMs)
+            put(
+                "tree_scan_age_ms",
+                if (lastTreeScanFinishedMs > 0L) now - lastTreeScanFinishedMs else JSONObject.NULL
+            )
+            if (!error.isNullOrBlank()) put("error", error)
+        }.toString()
+    }
 
     private fun imageMatchJson(match: ImageTargetRuntime.ImageMatch): String = JSONObject().apply {
         put("type", "image_match")
@@ -654,6 +706,7 @@ class GenericAccessibilityService : AccessibilityService() {
         if (instance === this) instance = null
         mainHandler.removeCallbacks(snapshotRunnable)
         snapshotScheduled = false
+        snapshotBurstStartedMs = 0L
         ImageTargetRuntime.onMatch = null
         ImageTargetRuntime.clearWatch()
         imageExecutor.shutdownNow()
@@ -668,7 +721,14 @@ class GenericAccessibilityService : AccessibilityService() {
             private set
 
         private val TERMINAL_WORKFLOW_STATES = setOf("completed", "failed", "stopped", "cancelled")
-        private const val TREE_REFRESH_COALESCE_MS = 40L
+
+        // Full tree is delayed until event bursts quiet down so scrolling and
+        // animation do not continuously occupy the main looper. It is still
+        // forced periodically to keep the RAM index reasonably fresh.
+        private const val TREE_REFRESH_DEBOUNCE_MS = 120L
+        private const val TREE_REFRESH_COMMAND_GRACE_MS = 150L
+        private const val TREE_REFRESH_MAX_LATENCY_MS = 500L
+
         private const val FAST_SOURCE_MAX_NODES = 128
         private const val FAST_SOURCE_MAX_CANDIDATES = 32
         private const val SWIPE_DURATION_MS = 350L
