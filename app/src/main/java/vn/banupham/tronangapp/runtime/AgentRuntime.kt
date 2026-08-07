@@ -49,9 +49,10 @@ object AgentRuntime {
         newNodes.forEach { node ->
             listOfNotNull(node.text, node.contentDescription).forEach { raw ->
                 val normalized = normalizeForMatch(raw)
-                if (normalized.isBlank()) return@forEach
-                visible += normalized
-                if (node.enabled) ready += normalized
+                if (normalized.isNotBlank()) {
+                    visible += normalized
+                    if (node.enabled) ready += normalized
+                }
             }
         }
         visibleValues = visible
@@ -68,14 +69,10 @@ object AgentRuntime {
 
     fun isVisibleTarget(requested: String): Boolean = matches(visibleValues, requested)
 
-    fun isReadyTarget(requested: String): Boolean {
-        val ready = readyValues
-        if (matches(ready, requested)) return true
-        // Some apps expose a visible text node as disabled even though its
-        // clickable parent is already usable. Falling back to visible keeps
-        // WAIT event-driven instead of adding arbitrary time delays.
-        return matches(visibleValues, requested)
-    }
+    // WAIT is satisfied only by a node that Accessibility reports as both
+    // visible and enabled. It therefore reacts to hidden/disabled -> ready
+    // transitions without using a fixed sleep timer.
+    fun isReadyTarget(requested: String): Boolean = matches(readyValues, requested)
 
     private fun matches(values: Set<String>, requested: String): Boolean {
         val expected = normalizeForMatch(requested)
