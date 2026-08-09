@@ -1,6 +1,6 @@
 # HƯỚNG DẪN SỬ DỤNG TRONANGAPP
 
-Tài liệu áp dụng cho nhánh `main`, bản app `0.4.1`.
+Tài liệu áp dụng cho nhánh `main`, bản app `0.5.0`.
 
 `tronangapp` dùng Accessibility + WebSocket để chạy workflow trên Android. App hỗ trợ thao tác theo text trong Accessibility tree, thao tác hệ thống, nghỉ theo thời gian và tìm/click ảnh trong một ROI đã biết trước.
 
@@ -19,6 +19,14 @@ RECENTS
 SLEEP:giây
 WAIT_IMG:tên_ảnh
 CLICK_IMG:tên_ảnh
+LOOP:số_lần
+END_LOOP
+IF:text|label
+IF_NOT:text|label
+LABEL:tên
+GOTO:tên
+BREAK
+CONTINUE
 ```
 
 Ý nghĩa:
@@ -31,6 +39,10 @@ CLICK_IMG:tên_ảnh
 - `SLEEP:1`: nghỉ 1 giây; có thể dùng số thập phân như `SLEEP:0.15`.
 - `WAIT_IMG:name`: chờ ảnh mẫu xuất hiện.
 - `CLICK_IMG:name`: chờ ảnh mẫu xuất hiện rồi click ngay vào tâm ảnh match được.
+- `LOOP:n;...;END_LOOP`: lặp một khối `n` lần; hỗ trợ lồng vòng lặp.
+- `IF:text|label`, `IF_NOT:text|label`: rẽ nhánh tức thì từ RAM Accessibility index.
+- `LABEL:name`, `GOTO:name`: điểm nhảy và nhảy trực tiếp.
+- `BREAK`, `CONTINUE`: thoát hoặc chuyển lượt vòng lặp gần nhất.
 
 Ghép nhiều bước bằng dấu `;`:
 

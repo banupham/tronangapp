@@ -2,7 +2,7 @@
 
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
-## Bản 0.4.4
+## Bản 0.5.0
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`.
@@ -32,6 +32,14 @@ RECENTS
 SLEEP:seconds
 WAIT_IMG:image_name
 CLICK_IMG:image_name
+LOOP:count
+END_LOOP
+IF:text|label
+IF_NOT:text|label
+LABEL:name
+GOTO:name
+BREAK
+CONTINUE
 ```
 
 Ý nghĩa:
@@ -49,6 +57,14 @@ RECENTS             Android GLOBAL_ACTION_RECENTS
 SLEEP:0.5           nghỉ 0.5 giây; hỗ trợ số thập phân
 WAIT_IMG:name       chờ ảnh xuất hiện trong ROI rồi chạy bước tiếp theo
 CLICK_IMG:name      chờ ảnh xuất hiện trong ROI, click ngay tâm ảnh rồi chạy tiếp
+LOOP:5              bắt đầu khối lặp 5 lần
+END_LOOP            kết thúc khối lặp
+IF:text|label       nhảy tới label nếu text đang sẵn sàng trong Accessibility RAM index
+IF_NOT:text|label   nhảy tới label nếu text chưa sẵn sàng
+LABEL:name          khai báo điểm nhảy
+GOTO:name           nhảy trực tiếp tới label
+BREAK               thoát vòng lặp gần nhất
+CONTINUE            chuyển sang lượt tiếp theo của vòng lặp gần nhất
 ```
 
 `SLEEP` có alias `REST`, `NGHI`, `NGHỈ`. `WAIT` có alias `CHO`, `CHỜ`.
@@ -66,6 +82,14 @@ WAIT:Thanh toán;CLICK:Thanh toán;CLICK_IMG:nut_xac_nhan;SLEEP:0.2;BACK
 ```
 
 `WAIT` và `WAIT_IMG` không có timeout mặc định. `WAIT` chạy tiếp nhờ Accessibility event; `WAIT_IMG` chạy tiếp nhờ frame mới của MediaProjection.
+
+Ví dụ lặp và rẽ nhánh:
+
+```text
+LOOP:10;IF:Nhận thưởng|claim;DOWN;CONTINUE;LABEL:claim;CLICK:Nhận thưởng;BREAK;END_LOOP;HOME
+```
+
+Workflow được compile label và cặp loop một lần trước khi chạy. App giới hạn 100.000 bước thực thi và tự nhường main queue sau mỗi 256 bước logic liên tục để tránh vòng lặp sai làm khóa UI.
 
 ## Bật tìm ảnh
 

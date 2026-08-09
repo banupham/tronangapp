@@ -18,6 +18,22 @@ sealed class WorkflowStep {
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
     data class ClickImage(val target: String) : WorkflowStep()
+    data class Label(val name: String) : WorkflowStep()
+    data class Goto(val label: String, var destination: Int = -1) : WorkflowStep()
+    data class IfVisible(
+        val target: String,
+        val label: String,
+        var destination: Int = -1
+    ) : WorkflowStep()
+    data class IfNotVisible(
+        val target: String,
+        val label: String,
+        var destination: Int = -1
+    ) : WorkflowStep()
+    data class LoopStart(val count: Int, var endIndex: Int = -1) : WorkflowStep()
+    data class LoopEnd(var startIndex: Int = -1) : WorkflowStep()
+    data class Break(var startIndex: Int = -1, var endIndex: Int = -1) : WorkflowStep()
+    data class Continue(var endIndex: Int = -1) : WorkflowStep()
     data object Up : WorkflowStep()
     data object Down : WorkflowStep()
     data object Left : WorkflowStep()
@@ -50,6 +66,8 @@ class WorkflowEngine(
     private var actionInFlight = false
     private var executionId = 0L
     private var currentRequestId: String? = null
+    private var executedStepCount = 0
+    private val loopCounters = HashMap<Int, Int>()
 
     @Synchronized
     fun start(script: String, requestId: String? = null): WorkflowStatus {
@@ -93,6 +111,8 @@ class WorkflowEngine(
         steps = parsed
         index = 0
         actionInFlight = false
+        executedStepCount = 0
+        loopCounters.clear()
         setStatus(
             WorkflowStatus(
                 state = "running",
@@ -113,6 +133,8 @@ class WorkflowEngine(
         steps = emptyList()
         index = 0
         actionInFlight = false
+        executedStepCount = 0
+        loopCounters.clear()
         setStatus(
             WorkflowStatus(
                 state = "stopped",
@@ -190,8 +212,19 @@ class WorkflowEngine(
     private fun advanceLocked() {
         if (actionInFlight) return
 
+        var synchronousSteps = 0
         while (index < steps.size) {
             val step = steps[index]
+            if (synchronousSteps >= MAX_SYNCHRONOUS_STEPS) {
+                yieldExecutionLocked()
+                return
+            }
+            synchronousSteps++
+            executedStepCount++
+            if (executedStepCount > MAX_EXECUTED_STEPS) {
+                failLocked("workflow_step_limit_exceeded", step)
+                return
+            }
             when (step) {
                 is WorkflowStep.Wait -> {
                     if (!service.isTargetReady(step.target)) {
@@ -281,6 +314,43 @@ class WorkflowEngine(
                     startImageWaitLocked(step.target, step)
                     return
                 }
+
+                is WorkflowStep.Label -> index++
+
+                is WorkflowStep.Goto -> index = step.destination
+
+                is WorkflowStep.IfVisible -> {
+                    index = if (service.isTargetReady(step.target)) step.destination else index + 1
+                }
+
+                is WorkflowStep.IfNotVisible -> {
+                    index = if (!service.isTargetReady(step.target)) step.destination else index + 1
+                }
+
+                is WorkflowStep.LoopStart -> {
+                    loopCounters.putIfAbsent(index, step.count)
+                    index++
+                }
+
+                is WorkflowStep.LoopEnd -> {
+                    val start = step.startIndex
+                    val remaining = loopCounters[start]
+                        ?: (steps[start] as WorkflowStep.LoopStart).count
+                    if (remaining > 1) {
+                        loopCounters[start] = remaining - 1
+                        index = start + 1
+                    } else {
+                        loopCounters.remove(start)
+                        index++
+                    }
+                }
+
+                is WorkflowStep.Break -> {
+                    loopCounters.remove(step.startIndex)
+                    index = step.endIndex + 1
+                }
+
+                is WorkflowStep.Continue -> index = step.endIndex
             }
         }
 
@@ -294,6 +364,19 @@ class WorkflowEngine(
             )
         )
         currentRequestId = null
+        loopCounters.clear()
+    }
+
+    private fun yieldExecutionLocked() {
+        actionInFlight = true
+        val token = executionId
+        service.delayForWorkflow(0L) {
+            synchronized(this) {
+                if (token != executionId || !actionInFlight) return@synchronized
+                actionInFlight = false
+                advanceLocked()
+            }
+        }
     }
 
     private fun startDescriptionRegexClickLocked(step: WorkflowStep.ClickDescriptionRegex) {
@@ -415,6 +498,7 @@ class WorkflowEngine(
             ).copy(requestId = requestId)
         )
         currentRequestId = null
+        loopCounters.clear()
     }
 
     private fun cancelCurrentForReplacementLocked() {
@@ -459,6 +543,14 @@ class WorkflowEngine(
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
         is WorkflowStep.ClickImage -> "CLICK_IMG"
+        is WorkflowStep.Label -> "LABEL"
+        is WorkflowStep.Goto -> "GOTO"
+        is WorkflowStep.IfVisible -> "IF"
+        is WorkflowStep.IfNotVisible -> "IF_NOT"
+        is WorkflowStep.LoopStart -> "LOOP"
+        is WorkflowStep.LoopEnd -> "END_LOOP"
+        is WorkflowStep.Break -> "BREAK"
+        is WorkflowStep.Continue -> "CONTINUE"
         WorkflowStep.Up -> "UP"
         WorkflowStep.Down -> "DOWN"
         WorkflowStep.Left -> "LEFT"
@@ -477,6 +569,14 @@ class WorkflowEngine(
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.WaitImage -> step.target
         is WorkflowStep.ClickImage -> step.target
+        is WorkflowStep.Label -> step.name
+        is WorkflowStep.Goto -> step.label
+        is WorkflowStep.IfVisible -> "${step.target}|${step.label}"
+        is WorkflowStep.IfNotVisible -> "${step.target}|${step.label}"
+        is WorkflowStep.LoopStart -> step.count.toString()
+        is WorkflowStep.LoopEnd,
+        is WorkflowStep.Break,
+        is WorkflowStep.Continue -> null
         WorkflowStep.Up,
         WorkflowStep.Down,
         WorkflowStep.Left,
@@ -503,7 +603,7 @@ class WorkflowEngine(
                 .map(String::trim)
                 .filter(String::isNotEmpty)
 
-            return tokens.map { token ->
+            val parsed = tokens.map { token ->
                 val command = token.substringBefore(':').trim().uppercase(Locale.ROOT)
                 val argument = token.substringAfter(':', "").trim()
                 when (command) {
@@ -597,6 +697,42 @@ class WorkflowEngine(
                         WorkflowStep.Down
                     }
 
+                    "LABEL" -> {
+                        require(argument.isNotEmpty()) { "LABEL_requires_name" }
+                        WorkflowStep.Label(normalizeLabel(argument))
+                    }
+
+                    "GOTO" -> {
+                        require(argument.isNotEmpty()) { "GOTO_requires_label" }
+                        WorkflowStep.Goto(normalizeLabel(argument))
+                    }
+
+                    "IF", "IF_VISIBLE" -> parseConditional(argument, negated = false)
+
+                    "IF_NOT", "IF_NOT_VISIBLE" -> parseConditional(argument, negated = true)
+
+                    "LOOP", "REPEAT" -> {
+                        val count = argument.toIntOrNull()
+                            ?: throw IllegalArgumentException("LOOP_requires_count")
+                        require(count in 1..MAX_LOOP_COUNT) { "LOOP_count_out_of_range" }
+                        WorkflowStep.LoopStart(count)
+                    }
+
+                    "END_LOOP", "ENDLOOP", "END_REPEAT" -> {
+                        require(argument.isEmpty()) { "END_LOOP_does_not_take_target" }
+                        WorkflowStep.LoopEnd()
+                    }
+
+                    "BREAK" -> {
+                        require(argument.isEmpty()) { "BREAK_does_not_take_target" }
+                        WorkflowStep.Break()
+                    }
+
+                    "CONTINUE" -> {
+                        require(argument.isEmpty()) { "CONTINUE_does_not_take_target" }
+                        WorkflowStep.Continue()
+                    }
+
                     "LEFT" -> {
                         require(argument.isEmpty()) { "LEFT_does_not_take_target" }
                         WorkflowStep.Left
@@ -625,12 +761,91 @@ class WorkflowEngine(
                     else -> throw IllegalArgumentException("unsupported_step:$command")
                 }
             }
+            resolveControlFlow(parsed)
         }
+
+        private fun parseConditional(argument: String, negated: Boolean): WorkflowStep {
+            val separator = argument.lastIndexOf('|')
+            require(separator > 0 && separator < argument.length - 1) {
+                if (negated) "IF_NOT_requires_target_and_label" else "IF_requires_target_and_label"
+            }
+            val target = argument.substring(0, separator).trim()
+            val label = normalizeLabel(argument.substring(separator + 1))
+            require(target.isNotEmpty() && label.isNotEmpty()) {
+                if (negated) "IF_NOT_requires_target_and_label" else "IF_requires_target_and_label"
+            }
+            return if (negated) {
+                WorkflowStep.IfNotVisible(target, label)
+            } else {
+                WorkflowStep.IfVisible(target, label)
+            }
+        }
+
+        private fun resolveControlFlow(steps: List<WorkflowStep>): List<WorkflowStep> {
+            val labels = HashMap<String, Int>()
+            val loopStack = ArrayList<Int>()
+
+            steps.forEachIndexed { index, step ->
+                when (step) {
+                    is WorkflowStep.Label -> {
+                        require(labels.put(step.name, index + 1) == null) {
+                            "duplicate_label:${step.name}"
+                        }
+                    }
+
+                    is WorkflowStep.LoopStart -> loopStack += index
+
+                    is WorkflowStep.LoopEnd -> {
+                        require(loopStack.isNotEmpty()) { "END_LOOP_without_LOOP" }
+                        val start = loopStack.removeAt(loopStack.lastIndex)
+                        step.startIndex = start
+                        (steps[start] as WorkflowStep.LoopStart).endIndex = index
+                    }
+
+                    is WorkflowStep.Break -> {
+                        require(loopStack.isNotEmpty()) { "BREAK_outside_LOOP" }
+                        step.startIndex = loopStack.last()
+                    }
+
+                    is WorkflowStep.Continue -> {
+                        require(loopStack.isNotEmpty()) { "CONTINUE_outside_LOOP" }
+                        step.endIndex = -loopStack.last() - 1
+                    }
+
+                    else -> Unit
+                }
+            }
+            require(loopStack.isEmpty()) { "LOOP_without_END_LOOP" }
+
+            steps.forEach { step ->
+                when (step) {
+                    is WorkflowStep.Goto -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.IfVisible -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.IfNotVisible -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.Break ->
+                        step.endIndex = (steps[step.startIndex] as WorkflowStep.LoopStart).endIndex
+                    is WorkflowStep.Continue -> {
+                        val start = -step.endIndex - 1
+                        step.endIndex = (steps[start] as WorkflowStep.LoopStart).endIndex
+                    }
+                    else -> Unit
+                }
+            }
+            return steps
+        }
+
+        private fun normalizeLabel(value: String): String = value.trim().uppercase(Locale.ROOT)
 
         private fun requireValidRegex(pattern: String, error: String) {
             require(runCatching { Regex(pattern) }.isSuccess) { error }
         }
 
         private const val MAX_SLEEP_SECONDS = 3_600.0
+        private const val MAX_LOOP_COUNT = 100_000
+        private const val MAX_EXECUTED_STEPS = 100_000
+        private const val MAX_SYNCHRONOUS_STEPS = 256
     }
 }
