@@ -93,6 +93,12 @@ Chạy:
 python tools\ws_server.py
 ```
 
+Mặc định lệnh này mở giao diện desktop để gửi điều khiển, workflow, xem log độ trễ và đọc bảng nodes. Muốn dùng console cũ:
+
+```cmd
+python tools\ws_server.py --cli
+```
+
 Server mặc định:
 
 ```text

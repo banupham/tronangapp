@@ -3,6 +3,7 @@ import base64
 import itertools
 import json
 import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -312,4 +313,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if "--cli" in sys.argv:
+        asyncio.run(main())
+    else:
+        from ws_gui import main as gui_main
+
+        gui_main()

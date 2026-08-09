@@ -1,0 +1,465 @@
+import asyncio
+import itertools
+import json
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+import websockets
+
+
+class WebSocketBackend:
+    def __init__(self, events):
+        self.events = events
+        self.loop = None
+        self.thread = None
+        self.stop_event = None
+        self.clients = set()
+
+    def start(self, host, port):
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(
+            target=self._thread_main,
+            args=(host, port),
+            name="tronangapp-ws",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def _thread_main(self, host, port):
+        try:
+            asyncio.run(self._run(host, port))
+        except Exception as error:
+            self.events.put(("server_error", str(error)))
+
+    async def _run(self, host, port):
+        self.loop = asyncio.get_running_loop()
+        self.stop_event = asyncio.Event()
+        async with websockets.serve(
+            self._handler,
+            host,
+            port,
+            max_size=32 * 1024 * 1024,
+        ):
+            self.events.put(("server_started", host, port))
+            await self.stop_event.wait()
+        self.clients.clear()
+        self.events.put(("server_stopped",))
+
+    async def _handler(self, ws):
+        self.clients.add(ws)
+        self.events.put(("client_count", len(self.clients)))
+        try:
+            async for message in ws:
+                self.events.put(("message", message))
+        finally:
+            self.clients.discard(ws)
+            self.events.put(("client_count", len(self.clients)))
+
+    async def _broadcast(self, message):
+        if not self.clients:
+            self.events.put(("send_error", "Chưa có điện thoại kết nối"))
+            return 0
+        sent = 0
+        for ws in list(self.clients):
+            try:
+                await ws.send(message)
+                sent += 1
+            except Exception:
+                self.clients.discard(ws)
+        self.events.put(("client_count", len(self.clients)))
+        return sent
+
+    def send(self, message):
+        if not self.loop or not self.loop.is_running():
+            self.events.put(("send_error", "WebSocket server chưa chạy"))
+            return
+        asyncio.run_coroutine_threadsafe(self._broadcast(message), self.loop)
+
+    def stop(self):
+        if self.loop and self.stop_event:
+            self.loop.call_soon_threadsafe(self.stop_event.set)
+
+
+class TronangControlApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Trợ năng App - WebSocket Control")
+        self.root.geometry("1180x760")
+        self.root.minsize(900, 600)
+
+        self.events = queue.Queue()
+        self.backend = WebSocketBackend(self.events)
+        self.command_ids = itertools.count(1)
+        self.pending = {}
+
+        self.host_var = tk.StringVar(value="0.0.0.0")
+        self.port_var = tk.StringVar(value="8765")
+        self.server_status_var = tk.StringVar(value="Đã dừng")
+        self.client_status_var = tk.StringVar(value="0 điện thoại")
+        self.node_limit_var = tk.StringVar(value="200")
+        self.node_offset_var = tk.StringVar(value="0")
+        self.node_filter_var = tk.StringVar()
+        self.node_summary_var = tk.StringVar(value="Chưa đọc nodes")
+        self.device_summary_var = tk.StringVar(value="Chưa có thiết bị")
+
+        self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(50, self._poll_events)
+        self.root.after(100, self.start_server)
+
+    def _build_ui(self):
+        top = ttk.Frame(self.root, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Host").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self.host_var, width=16).pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Label(top, text="Port").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self.port_var, width=8).pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Button(top, text="Khởi động", command=self.start_server).pack(side=tk.LEFT)
+        ttk.Button(top, text="Dừng", command=self.stop_server).pack(side=tk.LEFT, padx=6)
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Label(top, textvariable=self.server_status_var).pack(side=tk.LEFT)
+        ttk.Label(top, text=" • ").pack(side=tk.LEFT)
+        ttk.Label(top, textvariable=self.client_status_var).pack(side=tk.LEFT)
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        control = ttk.Frame(self.notebook, padding=10)
+        nodes = ttk.Frame(self.notebook, padding=8)
+        logs = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(control, text="Điều khiển")
+        self.notebook.add(nodes, text="Nodes")
+        self.notebook.add(logs, text="Log / độ trễ")
+        self._build_control_tab(control)
+        self._build_nodes_tab(nodes)
+        self._build_log_tab(logs)
+
+    def _build_control_tab(self, parent):
+        ttk.Label(parent, textvariable=self.device_summary_var).pack(anchor=tk.W, pady=(0, 8))
+
+        quick = ttk.LabelFrame(parent, text="Điều khiển nhanh", padding=8)
+        quick.pack(fill=tk.X)
+        for label, command in (
+            ("↑ UP", "UP"),
+            ("↓ DOWN", "DOWN"),
+            ("← LEFT", "LEFT"),
+            ("→ RIGHT", "RIGHT"),
+            ("BACK", "BACK"),
+            ("HOME", "HOME"),
+            ("RECENTS", "RECENTS"),
+        ):
+            ttk.Button(
+                quick,
+                text=label,
+                command=lambda value=command: self.send_workflow(value),
+            ).pack(side=tk.LEFT, padx=3)
+
+        actions = ttk.Frame(parent)
+        actions.pack(fill=tk.X, pady=8)
+        ttk.Button(actions, text="STOP workflow", command=self.send_stop).pack(side=tk.LEFT)
+        ttk.Button(actions, text="PING", command=lambda: self.backend.send("PING")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Capture status", command=self.request_capture).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Image targets", command=self.request_images).pack(side=tk.LEFT, padx=5)
+
+        workflow_frame = ttk.LabelFrame(parent, text="Workflow", padding=8)
+        workflow_frame.pack(fill=tk.BOTH, expand=True)
+        self.workflow_text = tk.Text(workflow_frame, height=12, wrap=tk.WORD, undo=True)
+        self.workflow_text.pack(fill=tk.BOTH, expand=True)
+        self.workflow_text.insert("1.0", "WAIT:Trợ năng App;SLEEP:0")
+
+        workflow_buttons = ttk.Frame(workflow_frame)
+        workflow_buttons.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(workflow_buttons, text="Gửi workflow", command=self.send_workflow_text).pack(side=tk.LEFT)
+        ttk.Button(workflow_buttons, text="Xóa", command=lambda: self.workflow_text.delete("1.0", tk.END)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            workflow_buttons,
+            text="Mẫu LOOP/IF",
+            command=self.insert_loop_example,
+        ).pack(side=tk.LEFT, padx=5)
+
+        raw_frame = ttk.LabelFrame(parent, text="Gửi JSON/text thô", padding=8)
+        raw_frame.pack(fill=tk.X, pady=(8, 0))
+        self.raw_entry = ttk.Entry(raw_frame)
+        self.raw_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.raw_entry.bind("<Return>", lambda _event: self.send_raw())
+        ttk.Button(raw_frame, text="Gửi", command=self.send_raw).pack(side=tk.LEFT, padx=(6, 0))
+
+    def _build_nodes_tab(self, parent):
+        filters = ttk.Frame(parent)
+        filters.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(filters, text="Limit").pack(side=tk.LEFT)
+        ttk.Entry(filters, textvariable=self.node_limit_var, width=7).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(filters, text="Offset").pack(side=tk.LEFT)
+        ttk.Entry(filters, textvariable=self.node_offset_var, width=8).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(filters, text="Lọc").pack(side=tk.LEFT)
+        filter_entry = ttk.Entry(filters, textvariable=self.node_filter_var, width=28)
+        filter_entry.pack(side=tk.LEFT, padx=(4, 8))
+        filter_entry.bind("<Return>", lambda _event: self.request_nodes())
+        ttk.Button(filters, text="Đọc nodes", command=self.request_nodes).pack(side=tk.LEFT)
+        ttk.Button(filters, text="Trang trước", command=lambda: self.change_node_page(-1)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(filters, text="Trang sau", command=lambda: self.change_node_page(1)).pack(side=tk.LEFT)
+        ttk.Label(filters, textvariable=self.node_summary_var).pack(side=tk.RIGHT)
+
+        columns = (
+            "key", "text", "description", "view_id", "class", "bounds", "enabled", "clickable"
+        )
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.node_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        widths = {
+            "key": 80,
+            "text": 180,
+            "description": 210,
+            "view_id": 180,
+            "class": 180,
+            "bounds": 150,
+            "enabled": 70,
+            "clickable": 70,
+        }
+        for column in columns:
+            self.node_tree.heading(column, text=column)
+            self.node_tree.column(column, width=widths[column], minwidth=55, stretch=True)
+        y_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.node_tree.yview)
+        x_scroll = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.node_tree.xview)
+        self.node_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.node_tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+    def _build_log_tab(self, parent):
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(toolbar, text="Xóa log", command=self.clear_log).pack(side=tk.LEFT)
+        self.log_text = tk.Text(parent, wrap=tk.NONE, state=tk.DISABLED)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def start_server(self):
+        try:
+            port = int(self.port_var.get())
+            if port < 1 or port > 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Port không hợp lệ", "Port phải nằm trong khoảng 1-65535")
+            return
+        if self.backend.thread and self.backend.thread.is_alive():
+            return
+        self.backend = WebSocketBackend(self.events)
+        self.server_status_var.set("Đang khởi động...")
+        self.backend.start(self.host_var.get().strip() or "0.0.0.0", port)
+
+    def stop_server(self):
+        self.backend.stop()
+
+    def send_workflow_text(self):
+        script = self.workflow_text.get("1.0", tk.END).strip()
+        if script:
+            self.send_workflow(script)
+
+    def send_workflow(self, script):
+        request_id = f"pc-{next(self.command_ids)}"
+        self.pending[request_id] = {
+            "sent": time.perf_counter(),
+            "received_phone_ms": None,
+            "started_phone_ms": None,
+        }
+        payload = json.dumps(
+            {"cmd": "run", "id": request_id, "script": script},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self._log(f"[{request_id}] SEND       {script}")
+        self.backend.send(payload)
+
+    def send_stop(self):
+        request_id = f"pc-{next(self.command_ids)}"
+        self.pending[request_id] = {"sent": time.perf_counter()}
+        self._log(f"[{request_id}] SEND       STOP")
+        self.backend.send(json.dumps({"cmd": "stop", "id": request_id}))
+
+    def send_raw(self):
+        value = self.raw_entry.get().strip()
+        if value:
+            self.backend.send(value)
+            self._log(f"PC RAW: {value}")
+
+    def request_nodes(self):
+        try:
+            limit = max(1, min(2000, int(self.node_limit_var.get())))
+            offset = max(0, int(self.node_offset_var.get()))
+        except ValueError:
+            messagebox.showerror("Giá trị không hợp lệ", "Limit và offset phải là số nguyên")
+            return
+        self.node_limit_var.set(str(limit))
+        self.node_offset_var.set(str(offset))
+        self.backend.send(json.dumps({
+            "cmd": "nodes",
+            "limit": limit,
+            "offset": offset,
+            "filter": self.node_filter_var.get().strip(),
+        }, ensure_ascii=False))
+
+    def change_node_page(self, direction):
+        try:
+            limit = max(1, int(self.node_limit_var.get()))
+            offset = max(0, int(self.node_offset_var.get()))
+        except ValueError:
+            return
+        self.node_offset_var.set(str(max(0, offset + direction * limit)))
+        self.request_nodes()
+
+    def request_capture(self):
+        self.backend.send(json.dumps({"cmd": "capture_status"}))
+
+    def request_images(self):
+        self.backend.send(json.dumps({"cmd": "image_list"}))
+
+    def insert_loop_example(self):
+        example = (
+            "LOOP:10;IF:Nhận thưởng|CLAIM;DOWN;CONTINUE;"
+            "LABEL:CLAIM;CLICK:Nhận thưởng;BREAK;END_LOOP;HOME"
+        )
+        self.workflow_text.delete("1.0", tk.END)
+        self.workflow_text.insert("1.0", example)
+
+    def _poll_events(self):
+        try:
+            while True:
+                event = self.events.get_nowait()
+                self._handle_event(event)
+        except queue.Empty:
+            pass
+        self.root.after(50, self._poll_events)
+
+    def _handle_event(self, event):
+        kind = event[0]
+        if kind == "server_started":
+            self.server_status_var.set(f"Đang nghe ws://{event[1]}:{event[2]}")
+            self._log(self.server_status_var.get())
+        elif kind == "server_stopped":
+            self.server_status_var.set("Đã dừng")
+            self.client_status_var.set("0 điện thoại")
+            self._log("WebSocket server đã dừng")
+        elif kind == "server_error":
+            self.server_status_var.set("Lỗi server")
+            self._log(f"SERVER ERROR: {event[1]}")
+            messagebox.showerror("WebSocket server", event[1])
+        elif kind == "client_count":
+            self.client_status_var.set(f"{event[1]} điện thoại")
+            self._log(f"Số điện thoại kết nối: {event[1]}")
+        elif kind == "send_error":
+            self._log(f"SEND ERROR: {event[1]}")
+        elif kind == "message":
+            self._handle_phone_message(event[1])
+
+    def _handle_phone_message(self, message):
+        try:
+            obj = json.loads(message)
+        except Exception:
+            self._log(f"PHONE: {message}")
+            return
+
+        message_type = obj.get("type")
+        if message_type == "ack":
+            self._handle_ack(obj)
+        elif message_type == "nodes":
+            self._show_nodes(obj)
+        elif message_type == "ready":
+            self.device_summary_var.set(f"Thiết bị sẵn sàng: {obj.get('source', 'tronangapp')}")
+            self._log(f"PHONE READY: {message}")
+        elif message_type == "workflow":
+            self._log(
+                "WORKFLOW "
+                f"id={obj.get('request_id')} state={obj.get('state')} "
+                f"step={obj.get('step')}/{obj.get('total')} "
+                f"command={obj.get('command')} target={obj.get('target')} "
+                f"error={obj.get('error')}"
+            )
+        else:
+            self._log(f"PHONE: {message}")
+
+    def _handle_ack(self, obj):
+        request_id = str(obj.get("id", "?"))
+        state = str(obj.get("state", "?"))
+        item = self.pending.get(request_id)
+        if not item:
+            self._log(f"[{request_id}] {state.upper()} phone_ms={obj.get('phone_ms')}")
+            return
+        elapsed = (time.perf_counter() - item["sent"]) * 1000.0
+        phone_ms = obj.get("phone_ms")
+        details = ""
+        if state == "received":
+            item["received_phone_ms"] = phone_ms
+        elif state == "started":
+            item["started_phone_ms"] = phone_ms
+            received = item.get("received_phone_ms")
+            if isinstance(phone_ms, (int, float)) and isinstance(received, (int, float)):
+                details += f" phone_queue={phone_ms - received:.1f}ms"
+            details += f" tree_scan={obj.get('last_tree_scan_ms')}ms"
+        elif state in {"completed", "failed", "stopped", "cancelled"}:
+            started = item.get("started_phone_ms")
+            if isinstance(phone_ms, (int, float)) and isinstance(started, (int, float)):
+                details += f" phone_execute={phone_ms - started:.1f}ms"
+            if obj.get("error"):
+                details += f" error={obj.get('error')}"
+            self.pending.pop(request_id, None)
+        self._log(f"[{request_id}] {state.upper():<10} +{elapsed:8.1f}ms{details}")
+
+    def _show_nodes(self, obj):
+        self.node_tree.delete(*self.node_tree.get_children())
+        for node in obj.get("nodes", []):
+            bounds = (
+                f"{node.get('left')},{node.get('top')},"
+                f"{node.get('right')},{node.get('bottom')}"
+            )
+            self.node_tree.insert("", tk.END, values=(
+                node.get("key"),
+                node.get("text"),
+                node.get("description"),
+                node.get("view_id"),
+                node.get("class"),
+                bounds,
+                node.get("enabled"),
+                node.get("clickable"),
+            ))
+        self.node_summary_var.set(
+            f"{obj.get('returned', 0)}/{obj.get('total', 0)} nodes • "
+            f"generation {obj.get('generation')}"
+        )
+        self.device_summary_var.set(f"Package: {obj.get('package')}")
+        self.notebook.select(1)
+        self._log(
+            f"NODES package={obj.get('package')} returned={obj.get('returned')}/"
+            f"{obj.get('total')} offset={obj.get('offset')} has_more={obj.get('has_more')}"
+        )
+
+    def _log(self, value):
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"{timestamp} {value}\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def clear_log(self):
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _on_close(self):
+        self.backend.stop()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    TronangControlApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

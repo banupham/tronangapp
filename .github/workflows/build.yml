@@ -33,6 +33,9 @@ jobs:
           test -n "$SIGNING_KEY_BASE64"
           printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/tronangapp-signing.p12"
 
+      - name: Check PC control tools
+        run: python -m py_compile tools/ws_server.py tools/ws_gui.py
+
       - name: Build debug APK
         env:
           TRONANGAPP_KEYSTORE_FILE: ${{ runner.temp }}/tronangapp-signing.p12
