@@ -10,13 +10,19 @@ from tkinter import messagebox, ttk
 import websockets
 
 
+MAX_EVENTS_PER_TICK = 100
+NODE_ROWS_PER_TICK = 50
+MAX_LOG_LINES = 5_000
+
+
 class WebSocketBackend:
     def __init__(self, events):
         self.events = events
         self.loop = None
         self.thread = None
         self.stop_event = None
-        self.clients = set()
+        self.clients = {}
+        self.client_ids = itertools.count(1)
 
     def start(self, host, port):
         if self.thread and self.thread.is_alive():
@@ -50,34 +56,51 @@ class WebSocketBackend:
         self.events.put(("server_stopped",))
 
     async def _handler(self, ws):
-        self.clients.add(ws)
-        self.events.put(("client_count", len(self.clients)))
+        client_id = f"phone-{next(self.client_ids)}"
+        remote = ws.remote_address
+        remote_label = f"{remote[0]}:{remote[1]}" if remote else client_id
+        self.clients[client_id] = ws
+        self.events.put(("client_connected", client_id, remote_label))
         try:
             async for message in ws:
-                self.events.put(("message", message))
+                try:
+                    payload = json.loads(message)
+                except Exception:
+                    payload = message
+                self.events.put(("message", client_id, payload))
         finally:
-            self.clients.discard(ws)
-            self.events.put(("client_count", len(self.clients)))
+            self.clients.pop(client_id, None)
+            self.events.put(("client_disconnected", client_id))
 
-    async def _broadcast(self, message):
+    async def _broadcast(self, message, target_ids):
         if not self.clients:
             self.events.put(("send_error", "Chưa có điện thoại kết nối"))
             return 0
+        targets = list(self.clients) if target_ids is None else list(target_ids)
+        if not targets:
+            self.events.put(("send_error", "Chưa chọn điện thoại"))
+            return 0
         sent = 0
-        for ws in list(self.clients):
+        for client_id in targets:
+            ws = self.clients.get(client_id)
+            if ws is None:
+                continue
             try:
                 await ws.send(message)
                 sent += 1
             except Exception:
-                self.clients.discard(ws)
-        self.events.put(("client_count", len(self.clients)))
+                self.clients.pop(client_id, None)
+                self.events.put(("client_disconnected", client_id))
         return sent
 
-    def send(self, message):
+    def send(self, message, target_ids=None):
         if not self.loop or not self.loop.is_running():
             self.events.put(("send_error", "WebSocket server chưa chạy"))
             return
-        asyncio.run_coroutine_threadsafe(self._broadcast(message), self.loop)
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast(message, tuple(target_ids) if target_ids is not None else None),
+            self.loop,
+        )
 
     def stop(self):
         if self.loop and self.stop_event:
@@ -95,6 +118,13 @@ class TronangControlApp:
         self.backend = WebSocketBackend(self.events)
         self.command_ids = itertools.count(1)
         self.pending = {}
+        self.device_vars = {}
+        self.device_labels = {}
+        self.device_widgets = {}
+        self.log_buffer = []
+        self.pending_node_rows = []
+        self.node_insert_scheduled = False
+        self.node_response_count = 0
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8765")
@@ -109,6 +139,7 @@ class TronangControlApp:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(50, self._poll_events)
+        self.root.after(100, self._flush_logs)
         self.root.after(100, self.start_server)
 
     def _build_ui(self):
@@ -124,6 +155,15 @@ class TronangControlApp:
         ttk.Label(top, textvariable=self.server_status_var).pack(side=tk.LEFT)
         ttk.Label(top, text=" • ").pack(side=tk.LEFT)
         ttk.Label(top, textvariable=self.client_status_var).pack(side=tk.LEFT)
+
+        devices = ttk.LabelFrame(self.root, text="Điện thoại nhận lệnh", padding=6)
+        devices.pack(fill=tk.X, padx=8, pady=(0, 6))
+        controls = ttk.Frame(devices)
+        controls.pack(side=tk.LEFT)
+        ttk.Button(controls, text="Chọn tất cả", command=lambda: self.select_all_devices(True)).pack(side=tk.LEFT)
+        ttk.Button(controls, text="Bỏ chọn tất cả", command=lambda: self.select_all_devices(False)).pack(side=tk.LEFT, padx=4)
+        self.device_checks = ttk.Frame(devices)
+        self.device_checks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -161,7 +201,11 @@ class TronangControlApp:
         actions = ttk.Frame(parent)
         actions.pack(fill=tk.X, pady=8)
         ttk.Button(actions, text="STOP workflow", command=self.send_stop).pack(side=tk.LEFT)
-        ttk.Button(actions, text="PING", command=lambda: self.backend.send("PING")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            actions,
+            text="PING",
+            command=lambda: self.backend.send("PING", self._selected_clients()),
+        ).pack(side=tk.LEFT, padx=5)
         ttk.Button(actions, text="Capture status", command=self.request_capture).pack(side=tk.LEFT, padx=5)
         ttk.Button(actions, text="Image targets", command=self.request_images).pack(side=tk.LEFT, padx=5)
 
@@ -205,12 +249,13 @@ class TronangControlApp:
         ttk.Label(filters, textvariable=self.node_summary_var).pack(side=tk.RIGHT)
 
         columns = (
-            "key", "text", "description", "view_id", "class", "bounds", "enabled", "clickable"
+            "device", "key", "text", "description", "view_id", "class", "bounds", "enabled", "clickable"
         )
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         self.node_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         widths = {
+            "device": 120,
             "key": 80,
             "text": 180,
             "description": 210,
@@ -262,30 +307,42 @@ class TronangControlApp:
             self.send_workflow(script)
 
     def send_workflow(self, script):
+        targets = self._selected_clients()
+        if not targets:
+            self._log("SEND ERROR: Chưa chọn điện thoại")
+            return
         request_id = f"pc-{next(self.command_ids)}"
-        self.pending[request_id] = {
-            "sent": time.perf_counter(),
-            "received_phone_ms": None,
-            "started_phone_ms": None,
-        }
+        sent_at = time.perf_counter()
+        for client_id in targets:
+            self.pending[(request_id, client_id)] = {
+                "sent": sent_at,
+                "received_phone_ms": None,
+                "started_phone_ms": None,
+            }
         payload = json.dumps(
             {"cmd": "run", "id": request_id, "script": script},
             ensure_ascii=False,
             separators=(",", ":"),
         )
         self._log(f"[{request_id}] SEND       {script}")
-        self.backend.send(payload)
+        self.backend.send(payload, targets)
 
     def send_stop(self):
+        targets = self._selected_clients()
+        if not targets:
+            self._log("SEND ERROR: Chưa chọn điện thoại")
+            return
         request_id = f"pc-{next(self.command_ids)}"
-        self.pending[request_id] = {"sent": time.perf_counter()}
+        sent_at = time.perf_counter()
+        for client_id in targets:
+            self.pending[(request_id, client_id)] = {"sent": sent_at}
         self._log(f"[{request_id}] SEND       STOP")
-        self.backend.send(json.dumps({"cmd": "stop", "id": request_id}))
+        self.backend.send(json.dumps({"cmd": "stop", "id": request_id}), targets)
 
     def send_raw(self):
         value = self.raw_entry.get().strip()
         if value:
-            self.backend.send(value)
+            self.backend.send(value, self._selected_clients())
             self._log(f"PC RAW: {value}")
 
     def request_nodes(self):
@@ -297,12 +354,16 @@ class TronangControlApp:
             return
         self.node_limit_var.set(str(limit))
         self.node_offset_var.set(str(offset))
+        targets = self._selected_clients()
+        self.node_tree.delete(*self.node_tree.get_children())
+        self.pending_node_rows.clear()
+        self.node_response_count = 0
         self.backend.send(json.dumps({
             "cmd": "nodes",
             "limit": limit,
             "offset": offset,
             "filter": self.node_filter_var.get().strip(),
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), targets)
 
     def change_node_page(self, direction):
         try:
@@ -314,10 +375,46 @@ class TronangControlApp:
         self.request_nodes()
 
     def request_capture(self):
-        self.backend.send(json.dumps({"cmd": "capture_status"}))
+        self.backend.send(json.dumps({"cmd": "capture_status"}), self._selected_clients())
 
     def request_images(self):
-        self.backend.send(json.dumps({"cmd": "image_list"}))
+        self.backend.send(json.dumps({"cmd": "image_list"}), self._selected_clients())
+
+    def _selected_clients(self):
+        return [client_id for client_id, value in self.device_vars.items() if value.get()]
+
+    def select_all_devices(self, selected):
+        for value in self.device_vars.values():
+            value.set(selected)
+
+    def _add_device(self, client_id, label):
+        if client_id in self.device_vars:
+            return
+        value = tk.BooleanVar(value=True)
+        widget = ttk.Checkbutton(
+            self.device_checks,
+            text=f"{client_id} • {label}",
+            variable=value,
+        )
+        widget.pack(side=tk.LEFT, padx=4)
+        self.device_vars[client_id] = value
+        self.device_labels[client_id] = label
+        self.device_widgets[client_id] = widget
+        self.client_status_var.set(f"{len(self.device_vars)} điện thoại")
+
+    def _remove_device(self, client_id):
+        widget = self.device_widgets.pop(client_id, None)
+        if widget:
+            widget.destroy()
+        self.device_vars.pop(client_id, None)
+        self.device_labels.pop(client_id, None)
+        for key in [key for key in self.pending if key[1] == client_id]:
+            self.pending.pop(key, None)
+        self.client_status_var.set(f"{len(self.device_vars)} điện thoại")
+
+    def _clear_devices(self):
+        for client_id in list(self.device_widgets):
+            self._remove_device(client_id)
 
     def insert_loop_example(self):
         example = (
@@ -328,13 +425,15 @@ class TronangControlApp:
         self.workflow_text.insert("1.0", example)
 
     def _poll_events(self):
+        processed = 0
         try:
-            while True:
+            while processed < MAX_EVENTS_PER_TICK:
                 event = self.events.get_nowait()
                 self._handle_event(event)
+                processed += 1
         except queue.Empty:
             pass
-        self.root.after(50, self._poll_events)
+        self.root.after(10 if not self.events.empty() else 50, self._poll_events)
 
     def _handle_event(self, event):
         kind = event[0]
@@ -343,52 +442,56 @@ class TronangControlApp:
             self._log(self.server_status_var.get())
         elif kind == "server_stopped":
             self.server_status_var.set("Đã dừng")
-            self.client_status_var.set("0 điện thoại")
+            self._clear_devices()
             self._log("WebSocket server đã dừng")
         elif kind == "server_error":
             self.server_status_var.set("Lỗi server")
             self._log(f"SERVER ERROR: {event[1]}")
             messagebox.showerror("WebSocket server", event[1])
-        elif kind == "client_count":
-            self.client_status_var.set(f"{event[1]} điện thoại")
-            self._log(f"Số điện thoại kết nối: {event[1]}")
+        elif kind == "client_connected":
+            self._add_device(event[1], event[2])
+            self._log(f"CONNECTED {event[1]} • {event[2]}")
+        elif kind == "client_disconnected":
+            label = self.device_labels.get(event[1], event[1])
+            self._remove_device(event[1])
+            self._log(f"DISCONNECTED {event[1]} • {label}")
         elif kind == "send_error":
             self._log(f"SEND ERROR: {event[1]}")
         elif kind == "message":
-            self._handle_phone_message(event[1])
+            self._handle_phone_message(event[1], event[2])
 
-    def _handle_phone_message(self, message):
-        try:
-            obj = json.loads(message)
-        except Exception:
-            self._log(f"PHONE: {message}")
+    def _handle_phone_message(self, client_id, payload):
+        label = self.device_labels.get(client_id, client_id)
+        if not isinstance(payload, dict):
+            self._log(f"[{client_id} • {label}] PHONE: {payload}")
             return
-
+        obj = payload
         message_type = obj.get("type")
         if message_type == "ack":
-            self._handle_ack(obj)
+            self._handle_ack(client_id, obj)
         elif message_type == "nodes":
-            self._show_nodes(obj)
+            self._show_nodes(client_id, obj)
         elif message_type == "ready":
-            self.device_summary_var.set(f"Thiết bị sẵn sàng: {obj.get('source', 'tronangapp')}")
-            self._log(f"PHONE READY: {message}")
+            self.device_summary_var.set(f"Thiết bị sẵn sàng: {len(self.device_vars)}")
+            self._log(f"[{client_id} • {label}] READY: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "workflow":
             self._log(
-                "WORKFLOW "
+                f"[{client_id} • {label}] WORKFLOW "
                 f"id={obj.get('request_id')} state={obj.get('state')} "
                 f"step={obj.get('step')}/{obj.get('total')} "
                 f"command={obj.get('command')} target={obj.get('target')} "
                 f"error={obj.get('error')}"
             )
         else:
-            self._log(f"PHONE: {message}")
+            self._log(f"[{client_id} • {label}] PHONE: {json.dumps(obj, ensure_ascii=False)}")
 
-    def _handle_ack(self, obj):
+    def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))
         state = str(obj.get("state", "?"))
-        item = self.pending.get(request_id)
+        item = self.pending.get((request_id, client_id))
+        prefix = f"[{client_id} {request_id}]"
         if not item:
-            self._log(f"[{request_id}] {state.upper()} phone_ms={obj.get('phone_ms')}")
+            self._log(f"{prefix} {state.upper()} phone_ms={obj.get('phone_ms')}")
             return
         elapsed = (time.perf_counter() - item["sent"]) * 1000.0
         phone_ms = obj.get("phone_ms")
@@ -407,17 +510,18 @@ class TronangControlApp:
                 details += f" phone_execute={phone_ms - started:.1f}ms"
             if obj.get("error"):
                 details += f" error={obj.get('error')}"
-            self.pending.pop(request_id, None)
-        self._log(f"[{request_id}] {state.upper():<10} +{elapsed:8.1f}ms{details}")
+            self.pending.pop((request_id, client_id), None)
+        self._log(f"{prefix} {state.upper():<10} +{elapsed:8.1f}ms{details}")
 
-    def _show_nodes(self, obj):
-        self.node_tree.delete(*self.node_tree.get_children())
+    def _show_nodes(self, client_id, obj):
+        label = self.device_labels.get(client_id, client_id)
         for node in obj.get("nodes", []):
             bounds = (
                 f"{node.get('left')},{node.get('top')},"
                 f"{node.get('right')},{node.get('bottom')}"
             )
-            self.node_tree.insert("", tk.END, values=(
+            self.pending_node_rows.append((
+                f"{client_id} • {label}",
                 node.get("key"),
                 node.get("text"),
                 node.get("description"),
@@ -427,25 +531,50 @@ class TronangControlApp:
                 node.get("enabled"),
                 node.get("clickable"),
             ))
+        self.node_response_count += 1
+        if not self.node_insert_scheduled:
+            self.node_insert_scheduled = True
+            self.root.after_idle(self._drain_node_rows)
         self.node_summary_var.set(
-            f"{obj.get('returned', 0)}/{obj.get('total', 0)} nodes • "
-            f"generation {obj.get('generation')}"
+            f"{self.node_response_count} thiết bị trả lời • "
+            f"{obj.get('returned', 0)}/{obj.get('total', 0)} nodes gần nhất"
         )
-        self.device_summary_var.set(f"Package: {obj.get('package')}")
+        self.device_summary_var.set(f"{client_id}: {obj.get('package')}")
         self.notebook.select(1)
         self._log(
-            f"NODES package={obj.get('package')} returned={obj.get('returned')}/"
+            f"[{client_id} • {label}] NODES package={obj.get('package')} returned={obj.get('returned')}/"
             f"{obj.get('total')} offset={obj.get('offset')} has_more={obj.get('has_more')}"
         )
 
+    def _drain_node_rows(self):
+        batch = self.pending_node_rows[:NODE_ROWS_PER_TICK]
+        del self.pending_node_rows[:NODE_ROWS_PER_TICK]
+        for values in batch:
+            self.node_tree.insert("", tk.END, values=values)
+        if self.pending_node_rows:
+            self.root.after(10, self._drain_node_rows)
+        else:
+            self.node_insert_scheduled = False
+
     def _log(self, value):
         timestamp = time.strftime("%H:%M:%S")
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"{timestamp} {value}\n")
-        self.log_text.see(tk.END)
-        self.log_text.configure(state=tk.DISABLED)
+        self.log_buffer.append(f"{timestamp} {value}\n")
+
+    def _flush_logs(self):
+        if self.log_buffer:
+            payload = "".join(self.log_buffer)
+            self.log_buffer.clear()
+            self.log_text.configure(state=tk.NORMAL)
+            self.log_text.insert(tk.END, payload)
+            line_count = int(self.log_text.index("end-1c").split(".")[0])
+            if line_count > MAX_LOG_LINES:
+                self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+            self.log_text.see(tk.END)
+            self.log_text.configure(state=tk.DISABLED)
+        self.root.after(100, self._flush_logs)
 
     def clear_log(self):
+        self.log_buffer.clear()
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state=tk.DISABLED)
