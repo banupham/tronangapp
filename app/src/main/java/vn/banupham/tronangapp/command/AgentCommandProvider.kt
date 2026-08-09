@@ -110,6 +110,16 @@ class AgentCommandProvider : ContentProvider() {
                 result(success, if (success) null else "command_not_applied")
             }
 
+            "left" -> {
+                val success = service.swipe("left")
+                result(success, if (success) null else "command_not_applied")
+            }
+
+            "right" -> {
+                val success = service.swipe("right")
+                result(success, if (success) null else "command_not_applied")
+            }
+
             "back" -> {
                 val success = service.performSystemAction("back")
                 result(success, if (success) null else "command_not_applied")

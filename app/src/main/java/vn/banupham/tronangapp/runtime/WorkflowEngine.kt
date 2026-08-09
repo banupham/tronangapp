@@ -20,6 +20,8 @@ sealed class WorkflowStep {
     data class ClickImage(val target: String) : WorkflowStep()
     data object Up : WorkflowStep()
     data object Down : WorkflowStep()
+    data object Left : WorkflowStep()
+    data object Right : WorkflowStep()
     data object Back : WorkflowStep()
     data object Home : WorkflowStep()
     data object Recents : WorkflowStep()
@@ -225,6 +227,16 @@ class WorkflowEngine(
 
                 WorkflowStep.Down -> {
                     startSwipeLocked("down", step)
+                    return
+                }
+
+                WorkflowStep.Left -> {
+                    startSwipeLocked("left", step)
+                    return
+                }
+
+                WorkflowStep.Right -> {
+                    startSwipeLocked("right", step)
                     return
                 }
 
@@ -449,6 +461,8 @@ class WorkflowEngine(
         is WorkflowStep.ClickImage -> "CLICK_IMG"
         WorkflowStep.Up -> "UP"
         WorkflowStep.Down -> "DOWN"
+        WorkflowStep.Left -> "LEFT"
+        WorkflowStep.Right -> "RIGHT"
         WorkflowStep.Back -> "BACK"
         WorkflowStep.Home -> "HOME"
         WorkflowStep.Recents -> "RECENTS"
@@ -465,6 +479,8 @@ class WorkflowEngine(
         is WorkflowStep.ClickImage -> step.target
         WorkflowStep.Up,
         WorkflowStep.Down,
+        WorkflowStep.Left,
+        WorkflowStep.Right,
         WorkflowStep.Back,
         WorkflowStep.Home,
         WorkflowStep.Recents -> null
@@ -579,6 +595,16 @@ class WorkflowEngine(
                     "DOWN" -> {
                         require(argument.isEmpty()) { "DOWN_does_not_take_target" }
                         WorkflowStep.Down
+                    }
+
+                    "LEFT" -> {
+                        require(argument.isEmpty()) { "LEFT_does_not_take_target" }
+                        WorkflowStep.Left
+                    }
+
+                    "RIGHT" -> {
+                        require(argument.isEmpty()) { "RIGHT_does_not_take_target" }
+                        WorkflowStep.Right
                     }
 
                     "BACK" -> {

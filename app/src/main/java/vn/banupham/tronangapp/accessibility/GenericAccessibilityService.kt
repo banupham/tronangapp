@@ -251,15 +251,34 @@ class GenericAccessibilityService : AccessibilityService() {
     private fun dispatchSwipe(direction: String, callback: GestureResultCallback?): Boolean {
         val upward = direction.equals("up", ignoreCase = true)
         val downward = direction.equals("down", ignoreCase = true)
-        if (!upward && !downward) return false
+        val leftward = direction.equals("left", ignoreCase = true)
+        val rightward = direction.equals("right", ignoreCase = true)
+        if (!upward && !downward && !leftward && !rightward) return false
 
         val width = resources.displayMetrics.widthPixels.toFloat()
         val height = resources.displayMetrics.heightPixels.toFloat()
-        val startY = if (upward) height * 0.75f else height * 0.30f
-        val endY = if (upward) height * 0.30f else height * 0.75f
         val path = Path().apply {
-            moveTo(width * 0.50f, startY)
-            lineTo(width * 0.50f, endY)
+            when {
+                upward -> {
+                    moveTo(width * 0.50f, height * 0.75f)
+                    lineTo(width * 0.50f, height * 0.30f)
+                }
+
+                downward -> {
+                    moveTo(width * 0.50f, height * 0.30f)
+                    lineTo(width * 0.50f, height * 0.75f)
+                }
+
+                leftward -> {
+                    moveTo(width * 0.75f, height * 0.50f)
+                    lineTo(width * 0.25f, height * 0.50f)
+                }
+
+                else -> {
+                    moveTo(width * 0.25f, height * 0.50f)
+                    lineTo(width * 0.75f, height * 0.50f)
+                }
+            }
         }
 
         return dispatchGesture(

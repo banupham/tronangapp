@@ -11,6 +11,8 @@ CLICK:text
 WAIT:text
 UP
 DOWN
+LEFT
+RIGHT
 BACK
 HOME
 RECENTS
@@ -24,6 +26,7 @@ CLICK_IMG:tên_ảnh
 - `CLICK:text`: tìm `text` hoặc `contentDescription` rồi click node/parent clickable.
 - `WAIT:text`: chờ target xuất hiện trong Accessibility.
 - `UP`, `DOWN`: vuốt lên/xuống.
+- `LEFT`, `RIGHT`: vuốt sang trái/phải.
 - `BACK`, `HOME`, `RECENTS`: thao tác hệ thống.
 - `SLEEP:1`: nghỉ 1 giây; có thể dùng số thập phân như `SLEEP:0.15`.
 - `WAIT_IMG:name`: chờ ảnh mẫu xuất hiện.

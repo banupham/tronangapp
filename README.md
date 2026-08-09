@@ -2,7 +2,7 @@
 
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
-## Bản 0.4.2
+## Bản 0.4.3
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`.
@@ -24,6 +24,8 @@ CLICK:text
 WAIT:text
 UP
 DOWN
+LEFT
+RIGHT
 BACK
 HOME
 RECENTS
@@ -39,6 +41,8 @@ CLICK:text          tìm text/contentDescription và click node/parent clickable
 WAIT:text           chờ text/contentDescription xuất hiện, không sleep cố định
 UP                  vuốt lên
 DOWN                vuốt xuống
+LEFT                vuốt sang trái
+RIGHT               vuốt sang phải
 BACK                Android GLOBAL_ACTION_BACK
 HOME                Android GLOBAL_ACTION_HOME
 RECENTS             Android GLOBAL_ACTION_RECENTS
