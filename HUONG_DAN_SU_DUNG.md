@@ -329,6 +329,7 @@ Xem ảnh đã nạp:
 
 ```text
 /images
+/nodes 200 0
 ```
 
 Xem trạng thái capture:

@@ -35,7 +35,7 @@ class GenericAccessibilityService : AccessibilityService() {
 
     private var generation = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val imageExecutor = Executors.newSingleThreadExecutor()
+    private val backgroundExecutor = Executors.newSingleThreadExecutor()
     private val legacyRequestCounter = AtomicLong(0L)
 
     private var snapshotScheduled = false
@@ -525,6 +525,8 @@ class GenericAccessibilityService : AccessibilityService() {
                 }.toString())
             }
 
+            "nodes", "node_list", "tree" -> sendNodesSnapshot(json)
+
             "capture_status" -> {
                 remoteSocket.send(JSONObject().apply {
                     put("type", "capture_status")
@@ -604,7 +606,7 @@ class GenericAccessibilityService : AccessibilityService() {
         val bottom = roi?.optInt("bottom", -1) ?: -1
         val threshold = json.optDouble("threshold", DEFAULT_IMAGE_THRESHOLD)
 
-        imageExecutor.execute {
+        backgroundExecutor.execute {
             val result = ImageTargetRuntime.registerBase64(
                 name = name,
                 encodedImage = encoded,
@@ -636,6 +638,61 @@ class GenericAccessibilityService : AccessibilityService() {
                 }
             )
             remoteSocket.send(response)
+        }
+    }
+
+    private fun sendNodesSnapshot(request: JSONObject) {
+        val limit = request.optInt("limit", DEFAULT_NODE_PAGE_SIZE)
+            .coerceIn(1, MAX_NODE_PAGE_SIZE)
+        val offset = request.optInt("offset", 0).coerceAtLeast(0)
+        val filter = AgentRuntime.normalizeForMatch(request.optString("filter"))
+        val requestId = request.opt("id")?.takeUnless { it === JSONObject.NULL }?.toString()
+
+        backgroundExecutor.execute {
+            val runtime = AgentRuntime.status
+            val snapshot = AgentRuntime.nodes
+            val filtered = if (filter.isBlank()) {
+                snapshot
+            } else {
+                snapshot.filter { node ->
+                    listOfNotNull(
+                        node.text,
+                        node.contentDescription,
+                        node.viewId,
+                        node.className
+                    ).any { value -> AgentRuntime.normalizeForMatch(value).contains(filter) }
+                }
+            }
+            val page = filtered.drop(offset).take(limit)
+            val payload = JSONObject().apply {
+                put("type", "nodes")
+                put("request_id", requestId ?: JSONObject.NULL)
+                put("package", runtime.packageName ?: JSONObject.NULL)
+                put("generation", runtime.generation)
+                put("total", filtered.size)
+                put("offset", offset)
+                put("returned", page.size)
+                put("has_more", offset + page.size < filtered.size)
+                put("nodes", JSONArray().apply {
+                    page.forEach { node ->
+                        put(JSONObject().apply {
+                            put("key", node.key)
+                            put("parent_key", node.parentKey ?: JSONObject.NULL)
+                            put("text", node.text ?: JSONObject.NULL)
+                            put("description", node.contentDescription ?: JSONObject.NULL)
+                            put("view_id", node.viewId ?: JSONObject.NULL)
+                            put("class", node.className ?: JSONObject.NULL)
+                            put("left", node.left)
+                            put("top", node.top)
+                            put("right", node.right)
+                            put("bottom", node.bottom)
+                            put("enabled", node.enabled)
+                            put("clickable", node.clickable)
+                        })
+                    }
+                })
+            }
+            remoteSocket.send(payload.toString())
         }
     }
 
@@ -733,7 +790,7 @@ class GenericAccessibilityService : AccessibilityService() {
         snapshotBurstStartedMs = 0L
         ImageTargetRuntime.onMatch = null
         ImageTargetRuntime.clearWatch()
-        imageExecutor.shutdownNow()
+        backgroundExecutor.shutdownNow()
         remoteSocket.disconnect(clearSavedUrl = false)
         AgentRuntime.disconnect()
         super.onDestroy()
@@ -757,5 +814,7 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val TREE_REFRESH_COMMAND_GRACE_MS = 90L
         private const val TREE_REFRESH_MAX_LATENCY_MS = 350L
         private const val DEFAULT_IMAGE_THRESHOLD = 0.90
+        private const val DEFAULT_NODE_PAGE_SIZE = 200
+        private const val MAX_NODE_PAGE_SIZE = 2_000
     }
 }

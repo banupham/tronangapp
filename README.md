@@ -2,7 +2,7 @@
 
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
-## Bản 0.4.3
+## Bản 0.4.4
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`.
@@ -159,6 +159,7 @@ Các JSON socket khác:
 
 ```json
 {"cmd":"image_list"}
+{"cmd":"nodes","limit":200,"offset":0,"filter":""}
 {"cmd":"capture_status"}
 {"cmd":"image_remove","name":"nut_claim"}
 {"cmd":"image_find","name":"nut_claim","click":false}
@@ -202,6 +203,7 @@ Các lệnh helper:
 
 ```text
 /images
+/nodes 200 0
 /capture
 /find nut_claim
 /clickimg nut_claim

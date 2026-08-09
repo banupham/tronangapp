@@ -4,6 +4,8 @@
 *.p12
 keystore.properties
 signing-recovery.txt
+__pycache__/
+*.pyc
 .gradle/
 /local.properties
 /.idea/

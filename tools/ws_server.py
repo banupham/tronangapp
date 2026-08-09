@@ -108,6 +108,30 @@ def handle_phone_message(message):
         )
         return
 
+    if obj.get("type") == "nodes":
+        print(
+            "PHONE nodes:",
+            f"package={obj.get('package')}",
+            f"generation={obj.get('generation')}",
+            f"returned={obj.get('returned')}/{obj.get('total')}",
+            f"offset={obj.get('offset')}",
+            f"has_more={obj.get('has_more')}",
+        )
+        for node in obj.get("nodes", []):
+            print(
+                " NODE",
+                f"key={node.get('key')}",
+                f"text={node.get('text')!r}",
+                f"description={node.get('description')!r}",
+                f"view_id={node.get('view_id')!r}",
+                f"class={node.get('class')!r}",
+                f"bounds=({node.get('left')},{node.get('top')},"
+                f"{node.get('right')},{node.get('bottom')})",
+                f"enabled={node.get('enabled')}",
+                f"clickable={node.get('clickable')}",
+            )
+        return
+
     print("PHONE:", message)
 
 
@@ -224,6 +248,7 @@ async def console():
     print("  /find NAME        -> WAIT_IMG:NAME")
     print("  /clickimg NAME    -> CLICK_IMG:NAME")
     print("  /images           -> list image targets")
+    print("  /nodes [LIMIT] [OFFSET] [FILTER] -> read Accessibility nodes")
     print("  /capture          -> capture status")
     print("  /ping             -> socket ping/pong test")
     print("  /stop             -> stop workflow")
@@ -255,6 +280,19 @@ async def console():
                 await send_workflow(f"CLICK_IMG:{name}")
             elif line == "/images":
                 await broadcast(json.dumps({"cmd": "image_list"}))
+            elif line == "/nodes" or line.startswith("/nodes "):
+                parts = split_console_line(line)
+                if len(parts) > 4:
+                    raise ValueError("usage: /nodes [LIMIT] [OFFSET] [FILTER]")
+                limit = int(parts[1]) if len(parts) >= 2 else 200
+                offset = int(parts[2]) if len(parts) >= 3 else 0
+                node_filter = parts[3] if len(parts) >= 4 else ""
+                await broadcast(json.dumps({
+                    "cmd": "nodes",
+                    "limit": limit,
+                    "offset": offset,
+                    "filter": node_filter,
+                }, ensure_ascii=False))
             elif line == "/capture":
                 await broadcast(json.dumps({"cmd": "capture_status"}))
             elif line == "/ping":
