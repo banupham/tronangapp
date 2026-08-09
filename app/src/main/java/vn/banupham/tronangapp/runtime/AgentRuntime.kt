@@ -41,22 +41,34 @@ object AgentRuntime {
     private var readyValues: Set<String> = emptySet()
 
     @Synchronized
-    fun update(packageName: String?, newNodes: List<NodeSnapshot>, generation: Long, lastEvent: String?) {
+    fun update(
+        packageName: String?,
+        newNodes: List<NodeSnapshot>,
+        generation: Long,
+        lastEvent: String?,
+        normalizedVisibleValues: Set<String>? = null,
+        normalizedReadyValues: Set<String>? = null
+    ) {
         nodes = newNodes
 
-        val visible = LinkedHashSet<String>()
-        val ready = LinkedHashSet<String>()
-        newNodes.forEach { node ->
-            listOfNotNull(node.text, node.contentDescription).forEach { raw ->
-                val normalized = normalizeForMatch(raw)
-                if (normalized.isNotBlank()) {
-                    visible += normalized
-                    if (node.enabled) ready += normalized
+        if (normalizedVisibleValues != null && normalizedReadyValues != null) {
+            visibleValues = normalizedVisibleValues
+            readyValues = normalizedReadyValues
+        } else {
+            val visible = LinkedHashSet<String>()
+            val ready = LinkedHashSet<String>()
+            newNodes.forEach { node ->
+                listOfNotNull(node.text, node.contentDescription).forEach { raw ->
+                    val normalized = normalizeForMatch(raw)
+                    if (normalized.isNotBlank()) {
+                        visible += normalized
+                        if (node.enabled) ready += normalized
+                    }
                 }
             }
+            visibleValues = visible
+            readyValues = ready
         }
-        visibleValues = visible
-        readyValues = ready
 
         status = RuntimeStatus(
             connected = true,

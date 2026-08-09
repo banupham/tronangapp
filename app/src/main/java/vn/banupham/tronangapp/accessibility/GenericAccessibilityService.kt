@@ -135,6 +135,8 @@ class GenericAccessibilityService : AccessibilityService() {
         val activePackage = root.packageName?.toString()
         val output = ArrayList<NodeSnapshot>()
         val newIndex = HashMap<String, MutableList<IndexedNode>>()
+        val visibleValues = LinkedHashSet<String>()
+        val readyValues = LinkedHashSet<String>()
 
         collectNode(
             node = root,
@@ -142,6 +144,8 @@ class GenericAccessibilityService : AccessibilityService() {
             key = "0",
             output = output,
             index = newIndex,
+            visibleValues = visibleValues,
+            readyValues = readyValues,
             depth = 0
         )
 
@@ -150,7 +154,9 @@ class GenericAccessibilityService : AccessibilityService() {
             packageName = activePackage,
             newNodes = output,
             generation = ++generation,
-            lastEvent = lastEvent
+            lastEvent = lastEvent,
+            normalizedVisibleValues = visibleValues,
+            normalizedReadyValues = readyValues
         )
 
         val finishedAt = SystemClock.elapsedRealtime()
@@ -165,6 +171,8 @@ class GenericAccessibilityService : AccessibilityService() {
         key: String,
         output: MutableList<NodeSnapshot>,
         index: MutableMap<String, MutableList<IndexedNode>>,
+        visibleValues: MutableSet<String>,
+        readyValues: MutableSet<String>,
         depth: Int
     ) {
         if (depth > MAX_DEPTH || output.size >= MAX_NODES) return
@@ -186,8 +194,14 @@ class GenericAccessibilityService : AccessibilityService() {
                 parentKey = parentKey
             )
 
-            addToIndex(index, node.text?.toString(), node, fieldPriority = 0)
-            addToIndex(index, node.contentDescription?.toString(), node, fieldPriority = 1)
+            addToIndex(index, node.text?.toString(), node, fieldPriority = 0)?.let { normalized ->
+                visibleValues += normalized
+                if (node.isEnabled) readyValues += normalized
+            }
+            addToIndex(index, node.contentDescription?.toString(), node, fieldPriority = 1)?.let { normalized ->
+                visibleValues += normalized
+                if (node.isEnabled) readyValues += normalized
+            }
         }
 
         for (childIndex in 0 until node.childCount) {
@@ -199,6 +213,8 @@ class GenericAccessibilityService : AccessibilityService() {
                 key = "$key.$childIndex",
                 output = output,
                 index = index,
+                visibleValues = visibleValues,
+                readyValues = readyValues,
                 depth = depth + 1
             )
         }
@@ -209,11 +225,12 @@ class GenericAccessibilityService : AccessibilityService() {
         rawValue: String?,
         node: AccessibilityNodeInfo,
         fieldPriority: Int
-    ) {
+    ): String? {
         val normalized = AgentRuntime.normalizeForMatch(rawValue.orEmpty())
-        if (normalized.isBlank()) return
+        if (normalized.isBlank()) return null
         index.getOrPut(normalized) { ArrayList() }
             .add(IndexedNode(node, fieldPriority))
+        return normalized
     }
 
     fun swipe(direction: String): Boolean = dispatchSwipe(direction, callback = null)

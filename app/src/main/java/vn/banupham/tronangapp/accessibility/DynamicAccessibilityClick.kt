@@ -59,6 +59,13 @@ object DynamicAccessibilityClick {
                 descriptionMatches(node, descriptionRegex) &&
                 roiMatches(node, selector.roi)
             ) {
+                // The breadth-first order is already the selector priority. Do
+                // not finish scanning a potentially large tree when Android can
+                // apply the semantic click immediately.
+                val clickable = clickableNode(node)
+                if (clickable?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+                    return StartResult.COMPLETED
+                }
                 candidates += node
             }
 
@@ -69,14 +76,6 @@ object DynamicAccessibilityClick {
         }
 
         if (candidates.isEmpty()) return StartResult.NOT_FOUND
-
-        // Prefer semantic Accessibility click first.
-        for (candidate in candidates) {
-            val clickable = clickableNode(candidate) ?: continue
-            if (clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                return StartResult.COMPLETED
-            }
-        }
 
         // Accessibility metadata is sometimes incomplete. Use the actual current
         // node bounds as a safe dynamic coordinate fallback instead of hardcoding

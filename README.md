@@ -2,7 +2,7 @@
 
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
-## Bản 0.3.0
+## Bản 0.4.1
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`.
@@ -257,12 +257,24 @@ adb shell content query --uri content://vn.banupham.tronangapp.commands/nodes
 Matcher hiện tại tối ưu cho trường hợp đã biết ROI nhỏ:
 
 - chỉ xử lý frame khi workflow đang `WAIT_IMG`/`CLICK_IMG`;
+- kiểm tra frame giữ lại ngay khi image watch được bật, không polling định kỳ;
 - chỉ quét ROI đã cấu hình;
 - lấy lưới mẫu 8x8 từ ảnh template;
 - coarse scan stride 2 px, sau đó refine vùng tốt nhất ở stride 1 px;
 - không ghi screenshot ra PNG/JPEG và không gửi screenshot qua mạng.
 
 Đây là matcher nhẹ ưu tiên độ trễ. Nó phù hợp với icon/nút có kích thước và màu sắc tương đối ổn định. Nếu vật thể thay đổi scale, xoay, hiệu ứng mạnh hoặc màu sắc lớn thì cần matcher nâng cao hơn.
+
+## Kiểm tra hồi quy độ trễ
+
+Mọi thay đổi trên đường điều khiển realtime cần so sánh log ACK trước và sau trên cùng thiết bị, mạng và workflow:
+
+- `SEND -> RECEIVED`: độ trễ mạng/WebSocket;
+- `RECEIVED -> STARTED` (`phone_queue`): hàng đợi main thread;
+- `STARTED -> COMPLETED` (`phone_execute`): thời gian thực thi workflow;
+- `last_tree_scan`: thời gian dựng lại Accessibility tree.
+
+Không gộp số đo mạng với số đo trên điện thoại. Với image workflow, nên chạy lặp lại cùng một target để kiểm tra cả lần quét ROI đầu tiên và fast path từ vị trí match gần nhất.
 
 ## Build
 

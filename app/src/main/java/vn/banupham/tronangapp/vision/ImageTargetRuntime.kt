@@ -63,21 +63,15 @@ object ImageTargetRuntime {
     @Volatile
     private var activeWatch: String? = null
 
-    /**
-     * Monotonic token for every startWatch call. The target name alone is not
-     * enough because repeated /find calls normally watch the same image name.
-     * Screen capture uses this token to notice every newly armed watch even if
-     * it never observed the brief null state between two workflows.
-     */
-    @Volatile
-    private var watchGeneration: Long = 0L
-
     @Volatile
     var lastMatch: ImageMatch? = null
         private set
 
     @Volatile
     var onMatch: ((ImageMatch) -> Unit)? = null
+
+    @Volatile
+    var onWatchStarted: (() -> Unit)? = null
 
     fun targetCount(): Int = targets.size
 
@@ -98,7 +92,15 @@ object ImageTargetRuntime {
         require(cleanName.isNotEmpty()) { "image_name_required" }
 
         val payload = encodedImage.substringAfter(',', encodedImage).trim()
+        require(payload.length <= MAX_ENCODED_IMAGE_CHARS) { "image_payload_too_large" }
         val bytes = Base64.decode(payload, Base64.DEFAULT)
+        require(bytes.size <= MAX_IMAGE_BYTES) { "image_payload_too_large" }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) { "image_decode_failed" }
+        require(bounds.outWidth.toLong() * bounds.outHeight.toLong() <= MAX_TEMPLATE_PIXELS) {
+            "image_dimensions_too_large"
+        }
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
             ?: error("image_decode_failed")
 
@@ -142,7 +144,7 @@ object ImageTargetRuntime {
         if (!targets.containsKey(key)) return false
         lastMatch = null
         activeWatch = key
-        watchGeneration++
+        onWatchStarted?.invoke()
         return true
     }
 
@@ -151,8 +153,6 @@ object ImageTargetRuntime {
     }
 
     fun activeWatchName(): String? = activeWatch?.let { targets[it]?.name ?: it }
-
-    fun activeWatchGeneration(): Long = if (activeWatch == null) 0L else watchGeneration
 
     fun processFrame(image: Image, screenWidth: Int, screenHeight: Int) {
         val key = activeWatch ?: return
@@ -441,4 +441,7 @@ object ImageTargetRuntime {
     private const val SAMPLE_GRID = 8
     private const val COARSE_STRIDE = 2
     private const val HINT_RADIUS = 4
+    private const val MAX_ENCODED_IMAGE_CHARS = 12 * 1024 * 1024
+    private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
+    private const val MAX_TEMPLATE_PIXELS = 16_000_000L
 }

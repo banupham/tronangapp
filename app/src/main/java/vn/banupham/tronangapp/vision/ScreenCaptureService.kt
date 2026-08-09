@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Process
 import android.util.DisplayMetrics
 import android.view.WindowManager
 
@@ -29,43 +30,9 @@ class ScreenCaptureService : Service() {
     private var captureHandler: Handler? = null
     private var latestImage: Image? = null
 
-    /** Last startWatch generation already checked against latestImage. */
-    private var lastProbedWatchGeneration: Long = -1L
-
     private var width: Int = 0
     private var height: Int = 0
     private var densityDpi: Int = 0
-
-    private val cachedFrameProbe = object : Runnable {
-        override fun run() {
-            val handler = captureHandler ?: return
-            try {
-                val generation = ImageTargetRuntime.activeWatchGeneration()
-
-                if (generation == 0L) {
-                    // No active workflow image wait. Reset so the next watch is
-                    // eligible even if it happens to use the same image name.
-                    lastProbedWatchGeneration = -1L
-                } else if (generation != lastProbedWatchGeneration) {
-                    // A unique generation is assigned on every startWatch call.
-                    // This fixes the old name-based race where repeated /find
-                    // nut_claim calls could be mistaken for the same watch and
-                    // then wait seconds for a new MediaProjection frame.
-                    lastProbedWatchGeneration = generation
-                    latestImage?.let { image ->
-                        runCatching {
-                            ImageTargetRuntime.processFrame(image, width, height)
-                        }
-                    }
-                }
-            } finally {
-                // Never let one bad/stale frame permanently kill the probe loop.
-                if (captureHandler === handler) {
-                    handler.postDelayed(this, CACHED_FRAME_PROBE_MS)
-                }
-            }
-        }
-    }
 
     override fun onCreate() {
         super.onCreate()
@@ -111,8 +78,18 @@ class ScreenCaptureService : Service() {
         captureHeight = height
         captureDensityDpi = densityDpi
 
-        captureThread = HandlerThread("tronangapp-screen-capture").also { it.start() }
+        captureThread = HandlerThread(
+            "tronangapp-screen-capture",
+            Process.THREAD_PRIORITY_DISPLAY
+        ).also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
+        ImageTargetRuntime.onWatchStarted = {
+            captureHandler?.post {
+                latestImage?.let { image ->
+                    runCatching { ImageTargetRuntime.processFrame(image, width, height) }
+                }
+            }
+        }
 
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val mediaProjection = manager.getMediaProjection(resultCode, resultData)
@@ -154,9 +131,6 @@ class ScreenCaptureService : Service() {
         )
         running = true
 
-        // Probe the retained frame for every new image-watch generation. This is
-        // independent of the target name, so repeated /find calls are reliable.
-        captureHandler?.post(cachedFrameProbe)
     }
 
     /**
@@ -204,8 +178,7 @@ class ScreenCaptureService : Service() {
         captureHeight = 0
         captureDensityDpi = 0
 
-        captureHandler?.removeCallbacks(cachedFrameProbe)
-        lastProbedWatchGeneration = -1L
+        ImageTargetRuntime.onWatchStarted = null
         runCatching { latestImage?.close() }
         latestImage = null
 
@@ -277,7 +250,6 @@ class ScreenCaptureService : Service() {
         var captureDensityDpi: Int = 0
             private set
 
-        private const val CACHED_FRAME_PROBE_MS = 8L
         private const val CHANNEL_ID = "tronangapp_capture"
         private const val NOTIFICATION_ID = 1201
     }

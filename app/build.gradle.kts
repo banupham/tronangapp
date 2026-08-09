@@ -15,9 +15,26 @@ android {
         versionName = "0.4.1"
     }
 
+    val ciKeyStoreFile = providers.environmentVariable("TRONANGAPP_KEYSTORE_FILE").orNull
+    if (!ciKeyStoreFile.isNullOrBlank()) {
+        signingConfigs {
+            create("persistent") {
+                storeFile = file(ciKeyStoreFile)
+                storePassword = providers.environmentVariable("TRONANGAPP_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("TRONANGAPP_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("TRONANGAPP_KEY_PASSWORD").get()
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("persistent")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
+            signingConfigs.findByName("persistent")?.let { signingConfig = it }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

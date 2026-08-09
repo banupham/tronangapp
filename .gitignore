@@ -1,4 +1,9 @@
 *.iml
+*.jks
+*.keystore
+*.p12
+keystore.properties
+signing-recovery.txt
 .gradle/
 /local.properties
 /.idea/
