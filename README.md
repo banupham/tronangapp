@@ -2,7 +2,7 @@
 
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
-## Bản 0.4.1
+## Bản 0.4.2
 
 - Android 10+ (`minSdk 29`).
 - Không giới hạn `android:packageNames`.

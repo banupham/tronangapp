@@ -7,15 +7,18 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -27,7 +30,11 @@ import vn.banupham.tronangapp.vision.ScreenCaptureService
 class MainActivity : Activity() {
     private lateinit var permissionStatus: TextView
     private lateinit var captureStatus: TextView
+    private lateinit var socketHostInput: EditText
+    private lateinit var socketPortInput: EditText
+    private lateinit var socketControlStatus: TextView
     private lateinit var runtimeStatus: TextView
+    private var socketFieldsInitialized = false
     private val handler = Handler(Looper.getMainLooper())
 
     private val refreshLoop = object : Runnable {
@@ -118,6 +125,45 @@ class MainActivity : Activity() {
         }, matchWrap())
 
         addView(TextView(context).apply {
+            text = "Kết nối WebSocket"
+            textSize = 18f
+            setPadding(0, 20, 0, 8)
+        }, matchWrap())
+
+        socketHostInput = EditText(context).apply {
+            hint = "IP hoặc hostname, ví dụ 192.168.1.100"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        addView(socketHostInput, matchWrap())
+
+        socketPortInput = EditText(context).apply {
+            hint = "Port"
+            setText(DEFAULT_SOCKET_PORT.toString())
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+        }
+        addView(socketPortInput, matchWrap())
+
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(context).apply {
+                text = "Kết nối"
+                setOnClickListener { connectSocketFromUi() }
+            }, weightedWrap())
+            addView(Button(context).apply {
+                text = "Ngắt kết nối"
+                setOnClickListener { disconnectSocketFromUi() }
+            }, weightedWrap())
+        }, matchWrap())
+
+        socketControlStatus = TextView(context).apply {
+            textSize = 14f
+            setPadding(0, 8, 0, 8)
+        }
+        addView(socketControlStatus, matchWrap())
+
+        addView(TextView(context).apply {
             text = "CMD:\nadb shell content query --uri content://vn.banupham.tronangapp.commands/status\n\nadb shell content query --uri content://vn.banupham.tronangapp.commands/nodes\n\nadb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg \"BACK;SLEEP:0.5;HOME\""
             textSize = 14f
             setTextIsSelectable(true)
@@ -149,6 +195,21 @@ class MainActivity : Activity() {
         val status = AgentRuntime.status
         val service = GenericAccessibilityService.instance
         val workflow = service?.workflowStatus()
+        val socketUrl = service?.socketUrl()
+        if (!socketFieldsInitialized && !socketUrl.isNullOrBlank()) {
+            val uri = Uri.parse(socketUrl)
+            socketHostInput.setText(uri.host ?: socketUrl.substringAfter("://").substringBefore(':'))
+            socketPortInput.setText((if (uri.port > 0) uri.port else DEFAULT_SOCKET_PORT).toString())
+            socketFieldsInitialized = true
+        }
+        socketControlStatus.text = buildString {
+            append("Trạng thái: ")
+            append(service?.socketState() ?: "service chưa chạy")
+            if (!socketUrl.isNullOrBlank()) {
+                append("\n")
+                append(socketUrl)
+            }
+        }
         runtimeStatus.text = buildString {
             append("Service: ")
             append(if (service != null) "đã kết nối" else "chưa kết nối")
@@ -181,6 +242,44 @@ class MainActivity : Activity() {
         stopService(Intent(this, ScreenCaptureService::class.java))
     }
 
+    private fun connectSocketFromUi() {
+        val service = GenericAccessibilityService.instance
+        if (service == null) {
+            socketControlStatus.text = "Hãy bật Trợ năng trước khi kết nối"
+            return
+        }
+
+        val rawHost = socketHostInput.text.toString().trim()
+        val port = socketPortInput.text.toString().toIntOrNull()
+        if (rawHost.isBlank() || port == null || port !in 1..65_535) {
+            socketControlStatus.text = "IP/hostname hoặc port không hợp lệ"
+            return
+        }
+
+        val parsed = Uri.parse(if (rawHost.contains("://")) rawHost else "ws://$rawHost")
+        val scheme = if (parsed.scheme.equals("wss", ignoreCase = true)) "wss" else "ws"
+        val host = parsed.host?.trim().orEmpty()
+        if (host.isBlank()) {
+            socketControlStatus.text = "IP/hostname không hợp lệ"
+            return
+        }
+
+        val url = "$scheme://$host:$port"
+        val success = service.connectSocket(url)
+        socketFieldsInitialized = true
+        socketControlStatus.text = if (success) "Đang kết nối: $url" else "Không thể kết nối: $url"
+    }
+
+    private fun disconnectSocketFromUi() {
+        val service = GenericAccessibilityService.instance
+        if (service == null) {
+            socketControlStatus.text = "Service chưa chạy"
+            return
+        }
+        service.disconnectSocket(clearSavedUrl = true)
+        socketControlStatus.text = "Đã ngắt kết nối"
+    }
+
     private fun openAccessibilitySettings() {
         runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
             .onFailure { startActivity(Intent(Settings.ACTION_SETTINGS)) }
@@ -207,7 +306,14 @@ class MainActivity : Activity() {
         ViewGroup.LayoutParams.WRAP_CONTENT
     )
 
+    private fun weightedWrap() = LinearLayout.LayoutParams(
+        0,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        1f
+    )
+
     companion object {
         private const val REQUEST_SCREEN_CAPTURE = 7101
+        private const val DEFAULT_SOCKET_PORT = 8765
     }
 }
