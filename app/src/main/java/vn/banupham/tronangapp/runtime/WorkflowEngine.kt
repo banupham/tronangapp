@@ -761,7 +761,7 @@ class WorkflowEngine(
                     else -> throw IllegalArgumentException("unsupported_step:$command")
                 }
             }
-            resolveControlFlow(parsed)
+            return resolveControlFlow(parsed)
         }
 
         private fun parseConditional(argument: String, negated: Boolean): WorkflowStep {
