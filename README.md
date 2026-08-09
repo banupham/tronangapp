@@ -51,6 +51,8 @@ UP                  vuốt lên
 DOWN                vuốt xuống
 LEFT                vuốt sang trái
 RIGHT               vuốt sang phải
+SWIPE:x1,y1,x2,y2,350
+                    vuốt từ điểm A(x1,y1) tới B(x2,y2) trong 350 ms
 BACK                Android GLOBAL_ACTION_BACK
 HOME                Android GLOBAL_ACTION_HOME
 RECENTS             Android GLOBAL_ACTION_RECENTS

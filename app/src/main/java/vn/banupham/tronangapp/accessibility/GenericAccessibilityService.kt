@@ -248,6 +248,43 @@ class GenericAccessibilityService : AccessibilityService() {
         return dispatchSwipe(direction, callback)
     }
 
+    fun swipeForWorkflow(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        durationMs: Long,
+        onComplete: (Boolean) -> Unit
+    ): Boolean {
+        val width = resources.displayMetrics.widthPixels
+        val height = resources.displayMetrics.heightPixels
+        if (
+            startX !in 0 until width || endX !in 0 until width ||
+            startY !in 0 until height || endY !in 0 until height
+        ) return false
+
+        val path = Path().apply {
+            moveTo(startX.toFloat(), startY.toFloat())
+            lineTo(endX.toFloat(), endY.toFloat())
+        }
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                onComplete(true)
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                onComplete(false)
+            }
+        }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                .build(),
+            callback,
+            null
+        )
+    }
+
     private fun dispatchSwipe(direction: String, callback: GestureResultCallback?): Boolean {
         val upward = direction.equals("up", ignoreCase = true)
         val downward = direction.equals("down", ignoreCase = true)

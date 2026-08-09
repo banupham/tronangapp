@@ -14,6 +14,13 @@ sealed class WorkflowStep {
         val label: String
     ) : WorkflowStep()
     data class Tap(val x: Int, val y: Int) : WorkflowStep()
+    data class Swipe(
+        val startX: Int,
+        val startY: Int,
+        val endX: Int,
+        val endY: Int,
+        val durationMs: Long
+    ) : WorkflowStep()
     data class Wait(val target: String) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
@@ -250,6 +257,11 @@ class WorkflowEngine(
 
                 is WorkflowStep.Tap -> {
                     startTapLocked(step)
+                    return
+                }
+
+                is WorkflowStep.Swipe -> {
+                    startCoordinateSwipeLocked(step)
                     return
                 }
 
@@ -539,6 +551,7 @@ class WorkflowEngine(
         is WorkflowStep.Click -> "CLICK"
         is WorkflowStep.ClickDescriptionRegex -> step.label
         is WorkflowStep.Tap -> "TAP"
+        is WorkflowStep.Swipe -> "SWIPE"
         is WorkflowStep.Wait -> "WAIT"
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
@@ -565,6 +578,8 @@ class WorkflowEngine(
         is WorkflowStep.ClickDescriptionRegex ->
             if (step.className.isNullOrBlank()) step.pattern else "${step.className}|${step.pattern}"
         is WorkflowStep.Tap -> "${step.x},${step.y}"
+        is WorkflowStep.Swipe ->
+            "${step.startX},${step.startY},${step.endX},${step.endY},${step.durationMs}"
         is WorkflowStep.Wait -> step.target
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.WaitImage -> step.target
@@ -661,6 +676,35 @@ class WorkflowEngine(
                             ?: throw IllegalArgumentException("TAP_invalid_y")
                         require(x >= 0 && y >= 0) { "TAP_coordinates_must_be_non_negative" }
                         WorkflowStep.Tap(x, y)
+                    }
+
+                    "SWIPE" -> {
+                        val parts = argument
+                            .replace(' ', ',')
+                            .split(',')
+                            .map(String::trim)
+                            .filter(String::isNotEmpty)
+                        require(parts.size == 5) { "SWIPE_requires_x1_y1_x2_y2_duration_ms" }
+                        val values = parts.mapIndexed { position, value ->
+                            value.toLongOrNull()
+                                ?: throw IllegalArgumentException("SWIPE_invalid_value_${position + 1}")
+                        }
+                        require(values.take(4).all { it in 0..Int.MAX_VALUE.toLong() }) {
+                            "SWIPE_coordinates_must_be_non_negative"
+                        }
+                        require(values[0] != values[2] || values[1] != values[3]) {
+                            "SWIPE_start_and_end_must_differ"
+                        }
+                        require(values[4] in MIN_SWIPE_DURATION_MS..MAX_SWIPE_DURATION_MS) {
+                            "SWIPE_duration_out_of_range"
+                        }
+                        WorkflowStep.Swipe(
+                            values[0].toInt(),
+                            values[1].toInt(),
+                            values[2].toInt(),
+                            values[3].toInt(),
+                            values[4]
+                        )
                     }
 
                     "WAIT", "CHO", "CHỜ" -> {
@@ -844,8 +888,29 @@ class WorkflowEngine(
         }
 
         private const val MAX_SLEEP_SECONDS = 3_600.0
+        private const val MIN_SWIPE_DURATION_MS = 50L
+        private const val MAX_SWIPE_DURATION_MS = 60_000L
         private const val MAX_LOOP_COUNT = 100_000
         private const val MAX_EXECUTED_STEPS = 100_000
         private const val MAX_SYNCHRONOUS_STEPS = 256
+    }
+
+    private fun startCoordinateSwipeLocked(step: WorkflowStep.Swipe) {
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("running", step))
+        val started = service.swipeForWorkflow(
+            step.startX,
+            step.startY,
+            step.endX,
+            step.endY,
+            step.durationMs
+        ) { success ->
+            onAsyncActionFinished(token, success, step, "swipe_cancelled")
+        }
+        if (!started) {
+            actionInFlight = false
+            failLocked("swipe_not_started_or_coordinates_out_of_bounds", step)
+        }
     }
 }

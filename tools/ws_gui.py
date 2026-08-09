@@ -135,6 +135,11 @@ class TronangControlApp:
         self.node_filter_var = tk.StringVar()
         self.node_summary_var = tk.StringVar(value="Chưa đọc nodes")
         self.device_summary_var = tk.StringVar(value="Chưa có thiết bị")
+        self.swipe_start_x_var = tk.StringVar(value="540")
+        self.swipe_start_y_var = tk.StringVar(value="1500")
+        self.swipe_end_x_var = tk.StringVar(value="540")
+        self.swipe_end_y_var = tk.StringVar(value="500")
+        self.swipe_duration_var = tk.StringVar(value="350")
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -197,6 +202,25 @@ class TronangControlApp:
                 text=label,
                 command=lambda value=command: self.send_workflow(value),
             ).pack(side=tk.LEFT, padx=3)
+
+        custom_swipe = ttk.LabelFrame(parent, text="Vuốt từ điểm A đến B", padding=8)
+        custom_swipe.pack(fill=tk.X, pady=(8, 0))
+        fields = (
+            ("A.x", self.swipe_start_x_var),
+            ("A.y", self.swipe_start_y_var),
+            ("B.x", self.swipe_end_x_var),
+            ("B.y", self.swipe_end_y_var),
+            ("Thời gian (ms)", self.swipe_duration_var),
+        )
+        for label, variable in fields:
+            ttk.Label(custom_swipe, text=label).pack(side=tk.LEFT, padx=(4, 2))
+            ttk.Entry(custom_swipe, textvariable=variable, width=7).pack(side=tk.LEFT)
+        ttk.Button(custom_swipe, text="Vuốt ngay", command=self.send_custom_swipe).pack(
+            side=tk.LEFT, padx=(10, 4)
+        )
+        ttk.Button(custom_swipe, text="Thêm vào workflow", command=self.append_custom_swipe).pack(
+            side=tk.LEFT
+        )
 
         actions = ttk.Frame(parent)
         actions.pack(fill=tk.X, pady=8)
@@ -305,6 +329,42 @@ class TronangControlApp:
         script = self.workflow_text.get("1.0", tk.END).strip()
         if script:
             self.send_workflow(script)
+
+    def _custom_swipe_command(self):
+        try:
+            values = [
+                int(self.swipe_start_x_var.get()),
+                int(self.swipe_start_y_var.get()),
+                int(self.swipe_end_x_var.get()),
+                int(self.swipe_end_y_var.get()),
+                int(self.swipe_duration_var.get()),
+            ]
+        except ValueError:
+            messagebox.showerror("Vuốt không hợp lệ", "Tọa độ và thời gian phải là số nguyên")
+            return None
+        if any(value < 0 for value in values[:4]):
+            messagebox.showerror("Vuốt không hợp lệ", "Tọa độ không được âm")
+            return None
+        if values[:2] == values[2:4]:
+            messagebox.showerror("Vuốt không hợp lệ", "Điểm A và B phải khác nhau")
+            return None
+        if not 50 <= values[4] <= 60_000:
+            messagebox.showerror("Vuốt không hợp lệ", "Thời gian phải từ 50 đến 60000 ms")
+            return None
+        return "SWIPE:" + ",".join(str(value) for value in values)
+
+    def send_custom_swipe(self):
+        command = self._custom_swipe_command()
+        if command:
+            self.send_workflow(command)
+
+    def append_custom_swipe(self):
+        command = self._custom_swipe_command()
+        if not command:
+            return
+        current = self.workflow_text.get("1.0", tk.END).strip()
+        self.workflow_text.delete("1.0", tk.END)
+        self.workflow_text.insert("1.0", f"{current};{command}" if current else command)
 
     def send_workflow(self, script):
         targets = self._selected_clients()
