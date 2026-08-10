@@ -2,6 +2,7 @@ package vn.banupham.tronangapp.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Handler
@@ -19,6 +20,7 @@ import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.NodeSnapshot
 import vn.banupham.tronangapp.runtime.WorkflowEngine
 import vn.banupham.tronangapp.runtime.WorkflowStatus
+import vn.banupham.tronangapp.ui.MainActivity
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
 
@@ -41,6 +43,7 @@ class GenericAccessibilityService : AccessibilityService() {
     private var snapshotScheduled = false
     private var snapshotBurstStartedMs = 0L
     private var pendingEventLabel: String? = null
+    private var autoCaptureConsentDeadlineMs = 0L
 
     @Volatile
     private var lastTreeScanDurationMs = 0L
@@ -91,13 +94,49 @@ class GenericAccessibilityService : AccessibilityService() {
         }
         remoteSocket.connectSaved()
         refreshSnapshot("service_connected")
+        mainHandler.postDelayed({ launchAutoCaptureRequest() }, AUTO_CAPTURE_LAUNCH_DELAY_MS)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        maybeApproveAutoCaptureConsent(event)
         val label = event?.let { AccessibilityEvent.eventTypeToString(it.eventType) }
 
         workflowEngine.onAccessibilitySource(event?.source)
         scheduleSnapshotRefresh(label)
+    }
+
+    fun armAutoCaptureConsent() {
+        autoCaptureConsentDeadlineMs = SystemClock.elapsedRealtime() + AUTO_CAPTURE_CONSENT_WINDOW_MS
+    }
+
+    fun disarmAutoCaptureConsent() {
+        autoCaptureConsentDeadlineMs = 0L
+    }
+
+    private fun launchAutoCaptureRequest() {
+        if (ScreenCaptureService.running) return
+        runCatching {
+            startActivity(Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra(MainActivity.EXTRA_AUTO_CAPTURE, true)
+            })
+        }
+    }
+
+    private fun maybeApproveAutoCaptureConsent(event: AccessibilityEvent?) {
+        val now = SystemClock.elapsedRealtime()
+        if (autoCaptureConsentDeadlineMs <= now) {
+            autoCaptureConsentDeadlineMs = 0L
+            return
+        }
+        if (event?.packageName?.toString() != SYSTEM_UI_PACKAGE) return
+        val root = rootInActiveWindow ?: return
+        if (root.findAccessibilityNodeInfosByText("Trợ năng App").isEmpty()) return
+        val positive = root.findAccessibilityNodeInfosByViewId("android:id/button1")
+            .firstOrNull { it.isEnabled && it.isClickable }
+            ?: return
+        autoCaptureConsentDeadlineMs = 0L
+        positive.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
     private fun scheduleSnapshotRefresh(lastEvent: String?) {
@@ -888,5 +927,8 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val DEFAULT_IMAGE_THRESHOLD = 0.90
         private const val DEFAULT_NODE_PAGE_SIZE = 200
         private const val MAX_NODE_PAGE_SIZE = 2_000
+        private const val AUTO_CAPTURE_LAUNCH_DELAY_MS = 1_000L
+        private const val AUTO_CAPTURE_CONSENT_WINDOW_MS = 10_000L
+        private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
     }
 }

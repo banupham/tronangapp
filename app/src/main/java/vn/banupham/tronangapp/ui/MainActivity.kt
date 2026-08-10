@@ -47,6 +47,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(ScrollView(this).apply { addView(buildContent()) })
+        handleAutoCaptureIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAutoCaptureIntent(intent)
     }
 
     override fun onResume() {
@@ -65,6 +72,7 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_SCREEN_CAPTURE) return
+        GenericAccessibilityService.instance?.disarmAutoCaptureConsent()
         if (resultCode != RESULT_OK || data == null) return
 
         val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
@@ -233,9 +241,19 @@ class MainActivity : Activity() {
     }
 
     private fun requestScreenCapture() {
+        GenericAccessibilityService.instance?.armAutoCaptureConsent()
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         @Suppress("DEPRECATION")
         startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
+    }
+
+    private fun handleAutoCaptureIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_AUTO_CAPTURE, false) != true) return
+        intent.removeExtra(EXTRA_AUTO_CAPTURE)
+        if (ScreenCaptureService.running) return
+        handler.postDelayed({
+            if (!isFinishing && !ScreenCaptureService.running) requestScreenCapture()
+        }, AUTO_CAPTURE_REQUEST_DELAY_MS)
     }
 
     private fun stopScreenCapture() {
@@ -314,6 +332,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_SCREEN_CAPTURE = 7101
-        private const val DEFAULT_SOCKET_PORT = 8765
+        private const val DEFAULT_SOCKET_PORT = 8770
+        private const val AUTO_CAPTURE_REQUEST_DELAY_MS = 350L
+        const val EXTRA_AUTO_CAPTURE = "auto_capture"
     }
 }
