@@ -1,5 +1,6 @@
 package vn.banupham.tronangapp.runtime
 
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.Locale
 import vn.banupham.tronangapp.accessibility.DynamicAccessibilityClick
@@ -60,9 +61,22 @@ data class WorkflowStatus(
     val requestId: String? = null
 )
 
+data class ImageClickTiming(
+    val requestId: String?,
+    val name: String,
+    val score: Double,
+    val findMs: Long,
+    val matchToDispatchMs: Long,
+    val gestureMs: Long,
+    val matchToClickMs: Long,
+    val totalMs: Long,
+    val success: Boolean
+)
+
 class WorkflowEngine(
     private val service: GenericAccessibilityService,
-    private val onStatusChanged: (WorkflowStatus) -> Unit = {}
+    private val onStatusChanged: (WorkflowStatus) -> Unit = {},
+    private val onImageClickTiming: (ImageClickTiming) -> Unit = {}
 ) {
     @Volatile
     var status: WorkflowStatus = WorkflowStatus()
@@ -74,6 +88,7 @@ class WorkflowEngine(
     private var executionId = 0L
     private var currentRequestId: String? = null
     private var executedStepCount = 0
+    private var imageWatchStartedMs = 0L
     private val loopCounters = HashMap<Int, Int>()
 
     @Synchronized
@@ -202,9 +217,31 @@ class WorkflowEngine(
             is WorkflowStep.ClickImage -> {
                 if (!sameImageName(step.target, match.name)) return
                 val token = executionId
+                val matchedAt = match.timestampMs
+                val watchStartedAt = imageWatchStartedMs.takeIf { it > 0L } ?: matchedAt
                 setStatus(statusFor("running", step))
+                val dispatchedAt = SystemClock.elapsedRealtime()
                 val started = service.tapForWorkflow(match.centerX, match.centerY) { success ->
-                    onAsyncActionFinished(token, success, step, "image_tap_cancelled")
+                    val completedAt = SystemClock.elapsedRealtime()
+                    synchronized(this) {
+                        if (token != executionId || !actionInFlight) return@synchronized
+                        if (steps.getOrNull(index) != step) return@synchronized
+                        onImageClickTiming(
+                            ImageClickTiming(
+                                requestId = currentRequestId,
+                                name = match.name,
+                                score = match.score,
+                                findMs = (matchedAt - watchStartedAt).coerceAtLeast(0L),
+                                matchToDispatchMs = (dispatchedAt - matchedAt).coerceAtLeast(0L),
+                                gestureMs = (completedAt - dispatchedAt).coerceAtLeast(0L),
+                                matchToClickMs = (completedAt - matchedAt).coerceAtLeast(0L),
+                                totalMs = (completedAt - watchStartedAt).coerceAtLeast(0L),
+                                success = success
+                            )
+                        )
+                        imageWatchStartedMs = 0L
+                        onAsyncActionFinished(token, success, step, "image_tap_cancelled")
+                    }
                 }
                 if (!started) {
                     actionInFlight = false
@@ -470,8 +507,10 @@ class WorkflowEngine(
         // Arm state before the matcher so an immediate frame match cannot race
         // ahead of the workflow state.
         actionInFlight = true
+        imageWatchStartedMs = SystemClock.elapsedRealtime()
         val error = service.startImageWatch(target)
         if (error != null) {
+            imageWatchStartedMs = 0L
             actionInFlight = false
             failLocked(error, step)
             return

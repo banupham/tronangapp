@@ -192,6 +192,8 @@ Khi match được ảnh, app gửi ngược:
 
 `CLICK_IMG:nut_claim` dùng ngay `x,y` vừa match để `dispatchGesture()`; không gửi tọa độ qua server rồi quay lại điện thoại.
 
+Sau mỗi `CLICK_IMG`, điện thoại gửi thêm log `IMAGE CLICK TIMING` gồm `find` (thời gian tìm ảnh), `match_to_dispatch` (từ phát hiện đến gửi gesture), `gesture` (Android thực thi gesture), `match_to_click` và `total`, tất cả tính bằng mili-giây trên cùng đồng hồ của điện thoại.
+
 Các JSON socket khác:
 
 ```json

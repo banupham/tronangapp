@@ -17,6 +17,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.ImageClickTiming
 import vn.banupham.tronangapp.runtime.NodeSnapshot
 import vn.banupham.tronangapp.runtime.WorkflowEngine
 import vn.banupham.tronangapp.runtime.WorkflowStatus
@@ -68,19 +69,25 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     private val workflowEngine by lazy {
-        WorkflowEngine(this) { status ->
-            remoteSocket.send(workflowStatusJson(status))
-            val requestId = status.requestId
-            if (requestId != null && status.state in TERMINAL_WORKFLOW_STATES) {
-                remoteSocket.send(
-                    commandAckJson(
-                        requestId = requestId,
-                        state = status.state,
-                        error = status.error
+        WorkflowEngine(
+            service = this,
+            onStatusChanged = { status ->
+                remoteSocket.send(workflowStatusJson(status))
+                val requestId = status.requestId
+                if (requestId != null && status.state in TERMINAL_WORKFLOW_STATES) {
+                    remoteSocket.send(
+                        commandAckJson(
+                            requestId = requestId,
+                            state = status.state,
+                            error = status.error
+                        )
                     )
-                )
+                }
+            },
+            onImageClickTiming = { timing ->
+                remoteSocket.send(imageClickTimingJson(timing))
             }
-        }
+        )
     }
 
     override fun onServiceConnected() {
@@ -900,6 +907,19 @@ class GenericAccessibilityService : AccessibilityService() {
         put("capture_height", ScreenCaptureService.captureHeight)
         put("capture_density_dpi", ScreenCaptureService.captureDensityDpi)
         put("timestamp_ms", match.timestampMs)
+    }.toString()
+
+    private fun imageClickTimingJson(timing: ImageClickTiming): String = JSONObject().apply {
+        put("type", "image_click_timing")
+        put("request_id", timing.requestId ?: JSONObject.NULL)
+        put("name", timing.name)
+        put("score", timing.score)
+        put("find_ms", timing.findMs)
+        put("match_to_dispatch_ms", timing.matchToDispatchMs)
+        put("gesture_ms", timing.gestureMs)
+        put("match_to_click_ms", timing.matchToClickMs)
+        put("total_ms", timing.totalMs)
+        put("success", timing.success)
     }.toString()
 
     private fun errorJson(error: String, detail: String? = null): String = JSONObject().apply {

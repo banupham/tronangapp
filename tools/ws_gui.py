@@ -662,6 +662,15 @@ class TronangControlApp:
                     f"({obj.get('width')}x{obj.get('height')})"
                 )
             self._log(f"[{client_id}] IMAGE PUT: {json.dumps(obj, ensure_ascii=False)}")
+        elif message_type == "image_click_timing":
+            self._log(
+                f"[{client_id} {obj.get('request_id')}] IMAGE CLICK TIMING "
+                f"name={obj.get('name')} find={obj.get('find_ms')}ms "
+                f"match_to_dispatch={obj.get('match_to_dispatch_ms')}ms "
+                f"gesture={obj.get('gesture_ms')}ms "
+                f"match_to_click={obj.get('match_to_click_ms')}ms "
+                f"total={obj.get('total_ms')}ms success={obj.get('success')}"
+            )
         elif message_type == "ready":
             self.device_summary_var.set(f"Thiết bị sẵn sàng: {len(self.device_vars)}")
             self._log(f"[{client_id} • {label}] READY: {json.dumps(obj, ensure_ascii=False)}")
