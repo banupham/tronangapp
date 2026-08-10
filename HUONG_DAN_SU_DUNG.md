@@ -84,7 +84,7 @@ tools/ws_server.py
 Cài thư viện:
 
 ```cmd
-python -m pip install websockets
+python -m pip install websockets Pillow
 ```
 
 Chạy:

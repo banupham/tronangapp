@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.graphics.Bitmap
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
@@ -19,8 +20,13 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Process
+import android.os.SystemClock
+import android.util.Base64
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -29,6 +35,9 @@ class ScreenCaptureService : Service() {
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
     private var latestImage: Image? = null
+    private val streamExecutor = Executors.newSingleThreadExecutor()
+    private val streamEncoding = AtomicBoolean(false)
+    private var lastStreamFrameMs = 0L
 
     private var width: Int = 0
     private var height: Int = 0
@@ -117,6 +126,7 @@ class ScreenCaptureService : Service() {
             runCatching {
                 ImageTargetRuntime.processFrame(image, width, height)
             }
+            maybeStreamFrame(image)
         }, captureHandler)
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
@@ -131,6 +141,53 @@ class ScreenCaptureService : Service() {
         )
         running = true
 
+    }
+
+    private fun maybeStreamFrame(image: Image) {
+        val consumer = streamConsumer ?: return
+        val now = SystemClock.elapsedRealtime()
+        val intervalMs = 1_000L / streamFps.coerceIn(1, 12)
+        if (now - lastStreamFrameMs < intervalMs || !streamEncoding.compareAndSet(false, true)) return
+        lastStreamFrameMs = now
+
+        val bitmap = runCatching { imageToBitmap(image) }.getOrElse {
+            streamEncoding.set(false)
+            return
+        }
+        streamExecutor.execute {
+            try {
+                val targetWidth = streamWidth.coerceIn(240, width)
+                val targetHeight = (bitmap.height * (targetWidth.toFloat() / bitmap.width))
+                    .toInt().coerceAtLeast(1)
+                val scaled = if (targetWidth == bitmap.width) bitmap else {
+                    Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+                        .also { bitmap.recycle() }
+                }
+                val output = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, streamQuality.coerceIn(35, 80), output)
+                scaled.recycle()
+                consumer(
+                    Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP),
+                    targetWidth,
+                    targetHeight,
+                    now
+                )
+            } finally {
+                streamEncoding.set(false)
+            }
+        }
+    }
+
+    private fun imageToBitmap(image: Image): Bitmap {
+        val plane = image.planes[0]
+        val pixelStride = plane.pixelStride
+        val rowStride = plane.rowStride
+        val paddedWidth = width + (rowStride - pixelStride * width) / pixelStride
+        val padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888)
+        plane.buffer.rewind()
+        padded.copyPixelsFromBuffer(plane.buffer)
+        if (paddedWidth == width) return padded
+        return Bitmap.createBitmap(padded, 0, 0, width, height).also { padded.recycle() }
     }
 
     /**
@@ -174,6 +231,7 @@ class ScreenCaptureService : Service() {
 
     private fun stopProjection() {
         running = false
+        configureStream(false)
         captureWidth = 0
         captureHeight = 0
         captureDensityDpi = 0
@@ -195,6 +253,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         stopProjection()
+        streamExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -249,6 +308,31 @@ class ScreenCaptureService : Service() {
         @Volatile
         var captureDensityDpi: Int = 0
             private set
+
+        @Volatile
+        private var streamConsumer: ((String, Int, Int, Long) -> Unit)? = null
+
+        @Volatile
+        private var streamFps: Int = 4
+
+        @Volatile
+        private var streamWidth: Int = 360
+
+        @Volatile
+        private var streamQuality: Int = 55
+
+        fun configureStream(
+            enabled: Boolean,
+            fps: Int = 4,
+            width: Int = 360,
+            quality: Int = 55,
+            consumer: ((String, Int, Int, Long) -> Unit)? = null
+        ) {
+            streamFps = fps.coerceIn(1, 12)
+            streamWidth = width.coerceIn(240, 720)
+            streamQuality = quality.coerceIn(35, 80)
+            streamConsumer = if (enabled) consumer else null
+        }
 
         private const val CHANNEL_ID = "tronangapp_capture"
         private const val NOTIFICATION_ID = 1201

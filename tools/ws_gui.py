@@ -1,13 +1,17 @@
 import asyncio
+import base64
+import io
 import itertools
 import json
 import queue
 import threading
 import time
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox, ttk
 
 import websockets
+from PIL import Image, ImageTk
 
 
 MAX_EVENTS_PER_TICK = 100
@@ -125,6 +129,12 @@ class TronangControlApp:
         self.pending_node_rows = []
         self.node_insert_scheduled = False
         self.node_response_count = 0
+        self.frame_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="screen-decode")
+        self.frame_lock = threading.Lock()
+        self.pending_frames = {}
+        self.frame_decode_busy = set()
+        self.screen_labels = {}
+        self.screen_images = {}
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8765")
@@ -140,6 +150,10 @@ class TronangControlApp:
         self.swipe_end_x_var = tk.StringVar(value="540")
         self.swipe_end_y_var = tk.StringVar(value="500")
         self.swipe_duration_var = tk.StringVar(value="350")
+        self.stream_fps_var = tk.StringVar(value="4")
+        self.stream_width_var = tk.StringVar(value="360")
+        self.stream_quality_var = tk.StringVar(value="55")
+        self.stream_status_var = tk.StringVar(value="Chế độ xem đang tắt")
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -176,10 +190,13 @@ class TronangControlApp:
         control = ttk.Frame(self.notebook, padding=10)
         nodes = ttk.Frame(self.notebook, padding=8)
         logs = ttk.Frame(self.notebook, padding=8)
+        screens = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(control, text="Điều khiển")
+        self.notebook.add(screens, text="Màn hình")
         self.notebook.add(nodes, text="Nodes")
         self.notebook.add(logs, text="Log / độ trễ")
         self._build_control_tab(control)
+        self._build_screens_tab(screens)
         self._build_nodes_tab(nodes)
         self._build_log_tab(logs)
 
@@ -300,6 +317,29 @@ class TronangControlApp:
         x_scroll.grid(row=1, column=0, sticky="ew")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+
+    def _build_screens_tab(self, parent):
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, pady=(0, 8))
+        for label, variable, width in (
+            ("FPS", self.stream_fps_var, 4),
+            ("Rộng", self.stream_width_var, 6),
+            ("JPEG %", self.stream_quality_var, 5),
+        ):
+            ttk.Label(toolbar, text=label).pack(side=tk.LEFT, padx=(4, 2))
+            ttk.Entry(toolbar, textvariable=variable, width=width).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Bắt đầu xem máy đã chọn", command=self.start_screen_stream).pack(
+            side=tk.LEFT, padx=(10, 4)
+        )
+        ttk.Button(toolbar, text="Dừng xem máy đã chọn", command=self.stop_screen_stream).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(toolbar, textvariable=self.stream_status_var).pack(side=tk.RIGHT)
+
+        self.screen_grid = ttk.Frame(parent)
+        self.screen_grid.pack(fill=tk.BOTH, expand=True)
+        self.screen_grid.columnconfigure(0, weight=1)
+        self.screen_grid.columnconfigure(1, weight=1)
 
     def _build_log_tab(self, parent):
         toolbar = ttk.Frame(parent)
@@ -440,6 +480,33 @@ class TronangControlApp:
     def request_images(self):
         self.backend.send(json.dumps({"cmd": "image_list"}), self._selected_clients())
 
+    def start_screen_stream(self):
+        try:
+            fps = max(1, min(12, int(self.stream_fps_var.get())))
+            width = max(240, min(720, int(self.stream_width_var.get())))
+            quality = max(35, min(80, int(self.stream_quality_var.get())))
+        except ValueError:
+            messagebox.showerror("Cấu hình không hợp lệ", "FPS, chiều rộng và JPEG phải là số nguyên")
+            return
+        targets = self._selected_clients()
+        if not targets:
+            self._log("SCREEN ERROR: Chưa chọn điện thoại")
+            return
+        self.stream_fps_var.set(str(fps))
+        self.stream_width_var.set(str(width))
+        self.stream_quality_var.set(str(quality))
+        self.backend.send(json.dumps({
+            "cmd": "screen_stream_start",
+            "fps": fps,
+            "width": width,
+            "quality": quality,
+        }), targets)
+        self.stream_status_var.set(f"Đang yêu cầu {fps} FPS • {width}px • JPEG {quality}%")
+
+    def stop_screen_stream(self):
+        targets = self._selected_clients()
+        self.backend.send(json.dumps({"cmd": "screen_stream_stop"}), targets)
+
     def _selected_clients(self):
         return [client_id for client_id, value in self.device_vars.items() if value.get()]
 
@@ -468,6 +535,12 @@ class TronangControlApp:
             widget.destroy()
         self.device_vars.pop(client_id, None)
         self.device_labels.pop(client_id, None)
+        screen = self.screen_labels.pop(client_id, None)
+        if screen:
+            screen.master.destroy()
+        self.screen_images.pop(client_id, None)
+        with self.frame_lock:
+            self.pending_frames.pop(client_id, None)
         for key in [key for key in self.pending if key[1] == client_id]:
             self.pending.pop(key, None)
         self.client_status_var.set(f"{len(self.device_vars)} điện thoại")
@@ -519,6 +592,10 @@ class TronangControlApp:
             self._log(f"SEND ERROR: {event[1]}")
         elif kind == "message":
             self._handle_phone_message(event[1], event[2])
+        elif kind == "decoded_frame":
+            self._show_screen_frame(event[1], event[2])
+        elif kind == "frame_error":
+            self._log(f"[{event[1]}] FRAME ERROR: {event[2]}")
 
     def _handle_phone_message(self, client_id, payload):
         label = self.device_labels.get(client_id, client_id)
@@ -531,6 +608,11 @@ class TronangControlApp:
             self._handle_ack(client_id, obj)
         elif message_type == "nodes":
             self._show_nodes(client_id, obj)
+        elif message_type == "screen_frame":
+            self._queue_screen_frame(client_id, obj)
+        elif message_type == "screen_stream":
+            self.stream_status_var.set(f"{client_id}: {obj.get('state')}")
+            self._log(f"[{client_id}] SCREEN {obj.get('state')}")
         elif message_type == "ready":
             self.device_summary_var.set(f"Thiết bị sẵn sàng: {len(self.device_vars)}")
             self._log(f"[{client_id} • {label}] READY: {json.dumps(obj, ensure_ascii=False)}")
@@ -544,6 +626,48 @@ class TronangControlApp:
             )
         else:
             self._log(f"[{client_id} • {label}] PHONE: {json.dumps(obj, ensure_ascii=False)}")
+
+    def _queue_screen_frame(self, client_id, obj):
+        encoded = obj.get("jpeg")
+        if not isinstance(encoded, str):
+            return
+        with self.frame_lock:
+            self.pending_frames[client_id] = encoded
+            if client_id in self.frame_decode_busy:
+                return
+            self.frame_decode_busy.add(client_id)
+        self.frame_executor.submit(self._decode_screen_frames, client_id)
+
+    def _decode_screen_frames(self, client_id):
+        while True:
+            with self.frame_lock:
+                encoded = self.pending_frames.pop(client_id, None)
+                if encoded is None:
+                    self.frame_decode_busy.discard(client_id)
+                    return
+            try:
+                image = Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
+                image.load()
+                self.events.put(("decoded_frame", client_id, image))
+            except Exception as error:
+                self.events.put(("frame_error", client_id, str(error)))
+
+    def _show_screen_frame(self, client_id, image):
+        widget = self.screen_labels.get(client_id)
+        if widget is None:
+            frame = ttk.LabelFrame(
+                self.screen_grid,
+                text=f"{client_id} • {self.device_labels.get(client_id, client_id)}",
+                padding=4,
+            )
+            position = len(self.screen_labels)
+            frame.grid(row=position // 2, column=position % 2, padx=4, pady=4, sticky="nsew")
+            widget = ttk.Label(frame, anchor=tk.CENTER)
+            widget.pack(fill=tk.BOTH, expand=True)
+            self.screen_labels[client_id] = widget
+        photo = ImageTk.PhotoImage(image)
+        self.screen_images[client_id] = photo
+        widget.configure(image=photo)
 
     def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))
@@ -600,7 +724,7 @@ class TronangControlApp:
             f"{obj.get('returned', 0)}/{obj.get('total', 0)} nodes gần nhất"
         )
         self.device_summary_var.set(f"{client_id}: {obj.get('package')}")
-        self.notebook.select(1)
+        self.notebook.select(2)
         self._log(
             f"[{client_id} • {label}] NODES package={obj.get('package')} returned={obj.get('returned')}/"
             f"{obj.get('total')} offset={obj.get('offset')} has_more={obj.get('has_more')}"
@@ -641,6 +765,7 @@ class TronangControlApp:
 
     def _on_close(self):
         self.backend.stop()
+        self.frame_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
 

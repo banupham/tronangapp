@@ -576,6 +576,38 @@ class GenericAccessibilityService : AccessibilityService() {
                 }.toString())
             }
 
+            "screen_stream_start" -> {
+                if (!ScreenCaptureService.running) {
+                    remoteSocket.send(errorJson("screen_capture_not_running"))
+                } else {
+                    val fps = json.optInt("fps", 4).coerceIn(1, 12)
+                    val width = json.optInt("width", 360).coerceIn(240, 720)
+                    val quality = json.optInt("quality", 55).coerceIn(35, 80)
+                    ScreenCaptureService.configureStream(true, fps, width, quality) {
+                            encoded, frameWidth, frameHeight, capturedAt ->
+                        remoteSocket.sendTransient(JSONObject().apply {
+                            put("type", "screen_frame")
+                            put("width", frameWidth)
+                            put("height", frameHeight)
+                            put("captured_ms", capturedAt)
+                            put("jpeg", encoded)
+                        }.toString())
+                    }
+                    remoteSocket.send(JSONObject().apply {
+                        put("type", "screen_stream")
+                        put("state", "started")
+                        put("fps", fps)
+                        put("width", width)
+                        put("quality", quality)
+                    }.toString())
+                }
+            }
+
+            "screen_stream_stop" -> {
+                ScreenCaptureService.configureStream(false)
+                remoteSocket.send("{\"type\":\"screen_stream\",\"state\":\"stopped\"}")
+            }
+
             "image_find" -> {
                 val requestId = requestIdFrom(json)
                 val name = json.optString("name")
@@ -821,6 +853,7 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        ScreenCaptureService.configureStream(false)
         if (instance === this) instance = null
         mainHandler.removeCallbacks(snapshotRunnable)
         snapshotScheduled = false

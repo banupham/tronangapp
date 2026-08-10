@@ -116,6 +116,14 @@ class RemoteSocketClient(
         return false
     }
 
+    /** Frames are disposable: never queue them across reconnects or behind old frames. */
+    @Synchronized
+    fun sendTransient(message: String): Boolean {
+        val socket = webSocket ?: return false
+        if (state != "connected" || socket.queueSize() > MAX_TRANSIENT_QUEUE_BYTES) return false
+        return socket.send(message)
+    }
+
     @Synchronized
     private fun openSocketLocked() {
         val target = url ?: return
@@ -231,6 +239,7 @@ class RemoteSocketClient(
         private const val PREFS_NAME = "remote_socket"
         private const val KEY_URL = "url"
         private const val MAX_PENDING_MESSAGES = 200
+        private const val MAX_TRANSIENT_QUEUE_BYTES = 128L * 1024L
         private const val SOCKET_PING_SECONDS = 5L
         private const val WIFI_LOCK_TAG = "tronangapp:realtime_socket"
     }
