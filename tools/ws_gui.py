@@ -137,7 +137,7 @@ class TronangControlApp:
         self.screen_images = {}
 
         self.host_var = tk.StringVar(value="0.0.0.0")
-        self.port_var = tk.StringVar(value="8766")
+        self.port_var = tk.StringVar(value="8770")
         self.server_status_var = tk.StringVar(value="Đã dừng")
         self.client_status_var = tk.StringVar(value="0 điện thoại")
         self.node_limit_var = tk.StringVar(value="200")
