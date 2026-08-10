@@ -589,6 +589,8 @@ class GenericAccessibilityService : AccessibilityService() {
                             put("type", "screen_frame")
                             put("width", frameWidth)
                             put("height", frameHeight)
+                            put("source_width", ScreenCaptureService.captureWidth)
+                            put("source_height", ScreenCaptureService.captureHeight)
                             put("captured_ms", capturedAt)
                             put("jpeg", encoded)
                         }.toString())

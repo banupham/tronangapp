@@ -135,6 +135,8 @@ class TronangControlApp:
         self.frame_decode_busy = set()
         self.screen_labels = {}
         self.screen_images = {}
+        self.screen_source_images = {}
+        self.screen_geometry = {}
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -153,6 +155,7 @@ class TronangControlApp:
         self.stream_fps_var = tk.StringVar(value="4")
         self.stream_width_var = tk.StringVar(value="360")
         self.stream_quality_var = tk.StringVar(value="55")
+        self.display_width_var = tk.StringVar(value="360")
         self.stream_status_var = tk.StringVar(value="Chế độ xem đang tắt")
 
         self._build_ui()
@@ -325,6 +328,7 @@ class TronangControlApp:
             ("FPS", self.stream_fps_var, 4),
             ("Rộng", self.stream_width_var, 6),
             ("JPEG %", self.stream_quality_var, 5),
+            ("Hiển thị", self.display_width_var, 6),
         ):
             ttk.Label(toolbar, text=label).pack(side=tk.LEFT, padx=(4, 2))
             ttk.Entry(toolbar, textvariable=variable, width=width).pack(side=tk.LEFT)
@@ -333,6 +337,9 @@ class TronangControlApp:
         )
         ttk.Button(toolbar, text="Dừng xem máy đã chọn", command=self.stop_screen_stream).pack(
             side=tk.LEFT
+        )
+        ttk.Button(toolbar, text="Đổi kích thước", command=self.apply_display_size).pack(
+            side=tk.LEFT, padx=4
         )
         ttk.Label(toolbar, textvariable=self.stream_status_var).pack(side=tk.RIGHT)
 
@@ -406,8 +413,8 @@ class TronangControlApp:
         self.workflow_text.delete("1.0", tk.END)
         self.workflow_text.insert("1.0", f"{current};{command}" if current else command)
 
-    def send_workflow(self, script):
-        targets = self._selected_clients()
+    def send_workflow(self, script, targets=None):
+        targets = self._selected_clients() if targets is None else list(targets)
         if not targets:
             self._log("SEND ERROR: Chưa chọn điện thoại")
             return
@@ -539,6 +546,8 @@ class TronangControlApp:
         if screen:
             screen.master.destroy()
         self.screen_images.pop(client_id, None)
+        self.screen_source_images.pop(client_id, None)
+        self.screen_geometry.pop(client_id, None)
         with self.frame_lock:
             self.pending_frames.pop(client_id, None)
         for key in [key for key in self.pending if key[1] == client_id]:
@@ -593,7 +602,7 @@ class TronangControlApp:
         elif kind == "message":
             self._handle_phone_message(event[1], event[2])
         elif kind == "decoded_frame":
-            self._show_screen_frame(event[1], event[2])
+            self._show_screen_frame(event[1], event[2], event[3], event[4])
         elif kind == "frame_error":
             self._log(f"[{event[1]}] FRAME ERROR: {event[2]}")
 
@@ -632,7 +641,7 @@ class TronangControlApp:
         if not isinstance(encoded, str):
             return
         with self.frame_lock:
-            self.pending_frames[client_id] = encoded
+            self.pending_frames[client_id] = (encoded, obj)
             if client_id in self.frame_decode_busy:
                 return
             self.frame_decode_busy.add(client_id)
@@ -641,18 +650,25 @@ class TronangControlApp:
     def _decode_screen_frames(self, client_id):
         while True:
             with self.frame_lock:
-                encoded = self.pending_frames.pop(client_id, None)
-                if encoded is None:
+                item = self.pending_frames.pop(client_id, None)
+                if item is None:
                     self.frame_decode_busy.discard(client_id)
                     return
+                encoded, metadata = item
             try:
                 image = Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
                 image.load()
-                self.events.put(("decoded_frame", client_id, image))
+                self.events.put((
+                    "decoded_frame",
+                    client_id,
+                    image,
+                    int(metadata.get("source_width") or image.width),
+                    int(metadata.get("source_height") or image.height),
+                ))
             except Exception as error:
                 self.events.put(("frame_error", client_id, str(error)))
 
-    def _show_screen_frame(self, client_id, image):
+    def _show_screen_frame(self, client_id, image, source_width, source_height):
         widget = self.screen_labels.get(client_id)
         if widget is None:
             frame = ttk.LabelFrame(
@@ -664,10 +680,67 @@ class TronangControlApp:
             frame.grid(row=position // 2, column=position % 2, padx=4, pady=4, sticky="nsew")
             widget = ttk.Label(frame, anchor=tk.CENTER)
             widget.pack(fill=tk.BOTH, expand=True)
+            widget.bind("<Button-1>", lambda event, device=client_id: self._click_screen(device, event))
+            widget.configure(cursor="hand2")
             self.screen_labels[client_id] = widget
-        photo = ImageTk.PhotoImage(image)
+        self.screen_source_images[client_id] = image
+        self.screen_geometry[client_id] = (source_width, source_height, image.width, image.height)
+        self._render_screen_image(client_id)
+
+    def _display_width(self):
+        try:
+            value = int(self.display_width_var.get())
+        except ValueError:
+            raise ValueError("Kích thước hiển thị phải là số nguyên")
+        if not 180 <= value <= 900:
+            raise ValueError("Kích thước hiển thị phải từ 180 đến 900 px")
+        return value
+
+    def apply_display_size(self):
+        try:
+            width = self._display_width()
+        except ValueError as error:
+            messagebox.showerror("Kích thước không hợp lệ", str(error))
+            return
+        self.display_width_var.set(str(width))
+        for client_id in list(self.screen_source_images):
+            self._render_screen_image(client_id)
+
+    def _render_screen_image(self, client_id):
+        image = self.screen_source_images.get(client_id)
+        widget = self.screen_labels.get(client_id)
+        if image is None or widget is None:
+            return
+        try:
+            width = self._display_width()
+        except ValueError:
+            width = image.width
+        height = max(1, round(image.height * width / image.width))
+        rendered = image if (width, height) == image.size else image.resize(
+            (width, height), Image.Resampling.BILINEAR
+        )
+        photo = ImageTk.PhotoImage(rendered)
         self.screen_images[client_id] = photo
         widget.configure(image=photo)
+        source_width, source_height, _, _ = self.screen_geometry[client_id]
+        self.screen_geometry[client_id] = (source_width, source_height, width, height)
+
+    def _click_screen(self, client_id, event):
+        geometry = self.screen_geometry.get(client_id)
+        widget = self.screen_labels.get(client_id)
+        if geometry is None or widget is None:
+            return
+        source_width, source_height, rendered_width, rendered_height = geometry
+        left = max(0, (widget.winfo_width() - rendered_width) // 2)
+        top = max(0, (widget.winfo_height() - rendered_height) // 2)
+        image_x = event.x - left
+        image_y = event.y - top
+        if not (0 <= image_x < rendered_width and 0 <= image_y < rendered_height):
+            return
+        target_x = min(source_width - 1, round(image_x * source_width / rendered_width))
+        target_y = min(source_height - 1, round(image_y * source_height / rendered_height))
+        self._log(f"[{client_id}] FRAME CLICK ({image_x},{image_y}) -> TAP:{target_x},{target_y}")
+        self.send_workflow(f"TAP:{target_x},{target_y}", [client_id])
 
     def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))

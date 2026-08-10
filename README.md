@@ -211,7 +211,8 @@ Lệnh trên mở ứng dụng desktop có ba tab:
 
 - `Điều khiển`: nút UP/DOWN/LEFT/RIGHT/BACK/HOME/RECENTS, gửi workflow và JSON thô;
 - `Màn hình`: xem luồng JPEG tùy chọn cho từng điện thoại; mặc định 4 FPS, rộng 360 px,
-  chỉ giữ frame mới nhất để không làm nghẽn lệnh điều khiển;
+  chỉ giữ frame mới nhất để không làm nghẽn lệnh điều khiển. Ô `Hiển thị` thay đổi kích thước
+  ảnh trên PC mà không tăng băng thông; click trực tiếp trong ảnh sẽ gửi `TAP:x,y` đúng điện thoại;
 - `Nodes`: đọc, lọc và phân trang Accessibility nodes;
 - `Log / độ trễ`: hiển thị ACK, `phone_queue`, `phone_execute` và tree scan.
 
