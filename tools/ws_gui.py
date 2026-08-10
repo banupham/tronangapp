@@ -137,6 +137,7 @@ class TronangControlApp:
         self.screen_images = {}
         self.screen_source_images = {}
         self.screen_geometry = {}
+        self.screen_render_job = None
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -155,7 +156,7 @@ class TronangControlApp:
         self.stream_fps_var = tk.StringVar(value="4")
         self.stream_width_var = tk.StringVar(value="360")
         self.stream_quality_var = tk.StringVar(value="55")
-        self.display_width_var = tk.StringVar(value="360")
+        self.display_width_var = tk.StringVar(value="100")
         self.stream_status_var = tk.StringVar(value="Chế độ xem đang tắt")
 
         self._build_ui()
@@ -328,7 +329,7 @@ class TronangControlApp:
             ("FPS", self.stream_fps_var, 4),
             ("Rộng", self.stream_width_var, 6),
             ("JPEG %", self.stream_quality_var, 5),
-            ("Hiển thị", self.display_width_var, 6),
+            ("Hiển thị %", self.display_width_var, 4),
         ):
             ttk.Label(toolbar, text=label).pack(side=tk.LEFT, padx=(4, 2))
             ttk.Entry(toolbar, textvariable=variable, width=width).pack(side=tk.LEFT)
@@ -347,6 +348,8 @@ class TronangControlApp:
         self.screen_grid.pack(fill=tk.BOTH, expand=True)
         self.screen_grid.columnconfigure(0, weight=1)
         self.screen_grid.columnconfigure(1, weight=1)
+        self.screen_grid.rowconfigure(0, weight=1)
+        self.screen_grid.bind("<Configure>", lambda _event: self._schedule_screen_render())
 
     def _build_log_tab(self, parent):
         toolbar = ttk.Frame(parent)
@@ -550,6 +553,7 @@ class TronangControlApp:
         self.screen_geometry.pop(client_id, None)
         with self.frame_lock:
             self.pending_frames.pop(client_id, None)
+        self._schedule_screen_render()
         for key in [key for key in self.pending if key[1] == client_id]:
             self.pending.pop(key, None)
         self.client_status_var.set(f"{len(self.device_vars)} điện thoại")
@@ -677,7 +681,9 @@ class TronangControlApp:
                 padding=4,
             )
             position = len(self.screen_labels)
-            frame.grid(row=position // 2, column=position % 2, padx=4, pady=4, sticky="nsew")
+            row = position // 2
+            self.screen_grid.rowconfigure(row, weight=1)
+            frame.grid(row=row, column=position % 2, padx=4, pady=4, sticky="nsew")
             widget = ttk.Label(frame, anchor=tk.CENTER)
             widget.pack(fill=tk.BOTH, expand=True)
             widget.bind("<Button-1>", lambda event, device=client_id: self._click_screen(device, event))
@@ -686,23 +692,34 @@ class TronangControlApp:
         self.screen_source_images[client_id] = image
         self.screen_geometry[client_id] = (source_width, source_height, image.width, image.height)
         self._render_screen_image(client_id)
+        self._schedule_screen_render()
 
-    def _display_width(self):
+    def _display_percent(self):
         try:
             value = int(self.display_width_var.get())
         except ValueError:
-            raise ValueError("Kích thước hiển thị phải là số nguyên")
-        if not 180 <= value <= 900:
-            raise ValueError("Kích thước hiển thị phải từ 180 đến 900 px")
+            raise ValueError("Tỷ lệ hiển thị phải là số nguyên")
+        if not 25 <= value <= 100:
+            raise ValueError("Tỷ lệ hiển thị phải từ 25 đến 100%")
         return value
 
     def apply_display_size(self):
         try:
-            width = self._display_width()
+            percent = self._display_percent()
         except ValueError as error:
             messagebox.showerror("Kích thước không hợp lệ", str(error))
             return
-        self.display_width_var.set(str(width))
+        self.display_width_var.set(str(percent))
+        for client_id in list(self.screen_source_images):
+            self._render_screen_image(client_id)
+
+    def _schedule_screen_render(self):
+        if self.screen_render_job is not None:
+            self.root.after_cancel(self.screen_render_job)
+        self.screen_render_job = self.root.after(80, self._render_all_screens)
+
+    def _render_all_screens(self):
+        self.screen_render_job = None
         for client_id in list(self.screen_source_images):
             self._render_screen_image(client_id)
 
@@ -712,10 +729,21 @@ class TronangControlApp:
         if image is None or widget is None:
             return
         try:
-            width = self._display_width()
+            percent = self._display_percent() / 100.0
         except ValueError:
-            width = image.width
-        height = max(1, round(image.height * width / image.width))
+            percent = 1.0
+        device_count = max(1, len(self.screen_labels))
+        columns = min(2, device_count)
+        rows = (device_count + columns - 1) // columns
+        available_width = max(100, self.screen_grid.winfo_width() // columns - 20)
+        available_height = max(100, self.screen_grid.winfo_height() // rows - 28)
+        width, height = self._fit_screen_size(
+            image.width,
+            image.height,
+            available_width,
+            available_height,
+            percent,
+        )
         rendered = image if (width, height) == image.size else image.resize(
             (width, height), Image.Resampling.BILINEAR
         )
@@ -724,6 +752,17 @@ class TronangControlApp:
         widget.configure(image=photo)
         source_width, source_height, _, _ = self.screen_geometry[client_id]
         self.screen_geometry[client_id] = (source_width, source_height, width, height)
+
+    @staticmethod
+    def _fit_screen_size(image_width, image_height, available_width, available_height, percent):
+        scale = min(
+            available_width * percent / image_width,
+            available_height * percent / image_height,
+        )
+        return (
+            max(1, round(image_width * scale)),
+            max(1, round(image_height * scale)),
+        )
 
     def _click_screen(self, client_id, event):
         geometry = self.screen_geometry.get(client_id)
