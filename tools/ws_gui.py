@@ -138,6 +138,7 @@ class TronangControlApp:
         self.screen_source_images = {}
         self.screen_geometry = {}
         self.screen_render_job = None
+        self.closing = False
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -174,6 +175,7 @@ class TronangControlApp:
         ttk.Entry(top, textvariable=self.port_var, width=8).pack(side=tk.LEFT, padx=(5, 10))
         ttk.Button(top, text="Khởi động", command=self.start_server).pack(side=tk.LEFT)
         ttk.Button(top, text="Dừng", command=self.stop_server).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Thoát ứng dụng", command=self._on_close).pack(side=tk.LEFT)
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         ttk.Label(top, textvariable=self.server_status_var).pack(side=tk.LEFT)
         ttk.Label(top, text=" • ").pack(side=tk.LEFT)
@@ -571,6 +573,8 @@ class TronangControlApp:
         self.workflow_text.insert("1.0", example)
 
     def _poll_events(self):
+        if self.closing:
+            return
         processed = 0
         try:
             while processed < MAX_EVENTS_PER_TICK:
@@ -857,6 +861,8 @@ class TronangControlApp:
         self.log_buffer.append(f"{timestamp} {value}\n")
 
     def _flush_logs(self):
+        if self.closing:
+            return
         if self.log_buffer:
             payload = "".join(self.log_buffer)
             self.log_buffer.clear()
@@ -876,8 +882,17 @@ class TronangControlApp:
         self.log_text.configure(state=tk.DISABLED)
 
     def _on_close(self):
+        if self.closing:
+            return
+        self.closing = True
+        if self.screen_render_job is not None:
+            self.root.after_cancel(self.screen_render_job)
+            self.screen_render_job = None
+        with self.frame_lock:
+            self.pending_frames.clear()
         self.backend.stop()
         self.frame_executor.shutdown(wait=False, cancel_futures=True)
+        self.root.quit()
         self.root.destroy()
 
 
