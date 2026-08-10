@@ -236,6 +236,21 @@ class RemoteSocketClient(
     }
 
     companion object {
+        fun savedUrl(context: Context): String? = context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_URL, null)
+
+        fun saveUrl(context: Context, requestedUrl: String): Boolean {
+            val normalized = requestedUrl.trim()
+            if (!normalized.startsWith("ws://") && !normalized.startsWith("wss://")) return false
+            context.applicationContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_URL, normalized)
+                .apply()
+            return true
+        }
+
         private const val PREFS_NAME = "remote_socket"
         private const val KEY_URL = "url"
         private const val MAX_PENDING_MESSAGES = 200

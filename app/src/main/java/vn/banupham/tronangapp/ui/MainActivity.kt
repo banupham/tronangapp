@@ -23,6 +23,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
+import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
@@ -160,6 +161,10 @@ class MainActivity : Activity() {
                 setOnClickListener { connectSocketFromUi() }
             }, weightedWrap())
             addView(Button(context).apply {
+                text = "Lưu cấu hình"
+                setOnClickListener { saveSocketFromUi() }
+            }, weightedWrap())
+            addView(Button(context).apply {
                 text = "Ngắt kết nối"
                 setOnClickListener { disconnectSocketFromUi() }
             }, weightedWrap())
@@ -203,7 +208,9 @@ class MainActivity : Activity() {
         val status = AgentRuntime.status
         val service = GenericAccessibilityService.instance
         val workflow = service?.workflowStatus()
-        val socketUrl = service?.socketUrl()
+        val activeSocketUrl = service?.socketUrl()
+        val savedSocketUrl = RemoteSocketClient.savedUrl(this)
+        val socketUrl = savedSocketUrl ?: activeSocketUrl
         if (!socketFieldsInitialized && !socketUrl.isNullOrBlank()) {
             val uri = Uri.parse(socketUrl)
             socketHostInput.setText(uri.host ?: socketUrl.substringAfter("://").substringBefore(':'))
@@ -213,9 +220,14 @@ class MainActivity : Activity() {
         socketControlStatus.text = buildString {
             append("Trạng thái: ")
             append(service?.socketState() ?: "service chưa chạy")
-            if (!socketUrl.isNullOrBlank()) {
+            if (!activeSocketUrl.isNullOrBlank()) {
                 append("\n")
-                append(socketUrl)
+                append("Đang dùng: ")
+                append(activeSocketUrl)
+            }
+            if (!savedSocketUrl.isNullOrBlank()) {
+                append("\nĐã lưu: ")
+                append(savedSocketUrl)
             }
         }
         runtimeStatus.text = buildString {
@@ -267,11 +279,29 @@ class MainActivity : Activity() {
             return
         }
 
+        val url = socketUrlFromInputs() ?: return
+        val success = service.connectSocket(url)
+        socketFieldsInitialized = true
+        socketControlStatus.text = if (success) "Đang kết nối: $url" else "Không thể kết nối: $url"
+    }
+
+    private fun saveSocketFromUi() {
+        val url = socketUrlFromInputs() ?: return
+        val success = RemoteSocketClient.saveUrl(this, url)
+        socketFieldsInitialized = true
+        socketControlStatus.text = if (success) {
+            "Đã lưu cấu hình: $url"
+        } else {
+            "Không thể lưu cấu hình: $url"
+        }
+    }
+
+    private fun socketUrlFromInputs(): String? {
         val rawHost = socketHostInput.text.toString().trim()
         val port = socketPortInput.text.toString().toIntOrNull()
         if (rawHost.isBlank() || port == null || port !in 1..65_535) {
             socketControlStatus.text = "IP/hostname hoặc port không hợp lệ"
-            return
+            return null
         }
 
         val parsed = Uri.parse(if (rawHost.contains("://")) rawHost else "ws://$rawHost")
@@ -279,13 +309,9 @@ class MainActivity : Activity() {
         val host = parsed.host?.trim().orEmpty()
         if (host.isBlank()) {
             socketControlStatus.text = "IP/hostname không hợp lệ"
-            return
+            return null
         }
-
-        val url = "$scheme://$host:$port"
-        val success = service.connectSocket(url)
-        socketFieldsInitialized = true
-        socketControlStatus.text = if (success) "Đang kết nối: $url" else "Không thể kết nối: $url"
+        return "$scheme://$host:$port"
     }
 
     private fun disconnectSocketFromUi() {
