@@ -86,6 +86,7 @@ class GenericAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        ImageTargetRuntime.initialize(this)
         ImageTargetRuntime.onMatch = { match ->
             mainHandler.post {
                 remoteSocket.send(imageMatchJson(match))

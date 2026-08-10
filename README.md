@@ -142,6 +142,8 @@ Cách nhanh nhất trên giao diện Windows:
 
 Mẫu được lấy trực tiếp từ frame gốc trên điện thoại, không lấy từ ảnh JPEG thu nhỏ đang hiển thị. `ROI ±px` giới hạn vùng tìm quanh vị trí mẫu để tăng tốc; đặt `0` nếu vật thể không di chuyển, hoặc tăng biên nếu vị trí có thể thay đổi.
 
+Mẫu được lưu riêng trên từng điện thoại và tự nạp lại khi app, dịch vụ trợ năng hoặc thiết bị khởi động lại. Cài đè APK bằng cùng khóa ký vẫn giữ mẫu; gỡ app hoặc xóa dữ liệu ứng dụng sẽ xóa mẫu.
+
 Socket nhận JSON `image_put`:
 
 ```json

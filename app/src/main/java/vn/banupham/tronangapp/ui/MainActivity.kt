@@ -47,6 +47,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ImageTargetRuntime.initialize(this)
         setContentView(ScrollView(this).apply { addView(buildContent()) })
         handleAutoCaptureIntent(intent)
     }

@@ -1,5 +1,7 @@
 package vn.banupham.tronangapp.vision
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.media.Image
@@ -9,6 +11,8 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * In-process image target registry + lightweight ROI matcher.
@@ -59,6 +63,10 @@ object ImageTargetRuntime {
 
     private val targets = ConcurrentHashMap<String, ImageTarget>()
     private val lastSuccessfulMatches = ConcurrentHashMap<String, ImageMatch>()
+    private val persistenceLock = Any()
+
+    @Volatile
+    private var preferences: SharedPreferences? = null
 
     @Volatile
     private var activeWatch: String? = null
@@ -72,6 +80,19 @@ object ImageTargetRuntime {
 
     @Volatile
     var onWatchStarted: (() -> Unit)? = null
+
+    fun initialize(context: Context) {
+        if (preferences != null) return
+        synchronized(persistenceLock) {
+            if (preferences != null) return
+            val prefs = context.applicationContext.getSharedPreferences(
+                PREFERENCES_NAME,
+                Context.MODE_PRIVATE
+            )
+            loadPersistedTargets(prefs.getString(PREFERENCES_KEY_TARGETS, null))
+            preferences = prefs
+        }
+    }
 
     fun targetCount(): Int = targets.size
 
@@ -126,6 +147,7 @@ object ImageTargetRuntime {
             // A newly uploaded template/ROI may represent a different visual or
             // search area, so never reuse a position learned from the old one.
             lastSuccessfulMatches.remove(key)
+            persistTargets()
             target
         } finally {
             bitmap.recycle()
@@ -186,6 +208,7 @@ object ImageTargetRuntime {
         val key = normalizeName(cleanName)
         targets[key] = target
         lastSuccessfulMatches.remove(key)
+        persistTargets()
         target
     }
 
@@ -193,7 +216,9 @@ object ImageTargetRuntime {
         val key = normalizeName(name)
         if (activeWatch == key) activeWatch = null
         lastSuccessfulMatches.remove(key)
-        return targets.remove(key) != null
+        val removed = targets.remove(key) != null
+        if (removed) persistTargets()
+        return removed
     }
 
     fun startWatch(name: String): Boolean {
@@ -493,6 +518,80 @@ object ImageTargetRuntime {
         return result
     }
 
+    private fun persistTargets() {
+        val prefs = preferences ?: return
+        val serialized = JSONArray().apply {
+            targets.values.sortedBy { normalizeName(it.name) }.forEach { target ->
+                put(JSONObject().apply {
+                    put("name", target.name)
+                    put("width", target.width)
+                    put("height", target.height)
+                    put("roi_left", target.roiLeft)
+                    put("roi_top", target.roiTop)
+                    put("roi_right", target.roiRight)
+                    put("roi_bottom", target.roiBottom)
+                    put("threshold", target.threshold)
+                    put("samples", JSONArray().apply {
+                        target.samples.forEach { sample ->
+                            put(JSONArray().apply {
+                                put(sample.x)
+                                put(sample.y)
+                                put(sample.red)
+                                put(sample.green)
+                                put(sample.blue)
+                            })
+                        }
+                    })
+                })
+            }
+        }.toString()
+        prefs.edit().putString(PREFERENCES_KEY_TARGETS, serialized).apply()
+    }
+
+    private fun loadPersistedTargets(serialized: String?) {
+        if (serialized.isNullOrBlank()) return
+        runCatching {
+            val stored = JSONArray(serialized)
+            for (index in 0 until stored.length()) {
+                val item = stored.getJSONObject(index)
+                val name = item.getString("name").trim()
+                val width = item.getInt("width")
+                val height = item.getInt("height")
+                val storedSamples = item.getJSONArray("samples")
+                require(name.isNotEmpty() && width > 0 && height > 0)
+                require(storedSamples.length() in 1..(SAMPLE_GRID * SAMPLE_GRID))
+                val samples = ArrayList<Sample>(storedSamples.length())
+                for (sampleIndex in 0 until storedSamples.length()) {
+                    val values = storedSamples.getJSONArray(sampleIndex)
+                    val sample = Sample(
+                        x = values.getInt(0),
+                        y = values.getInt(1),
+                        red = values.getInt(2),
+                        green = values.getInt(3),
+                        blue = values.getInt(4)
+                    )
+                    require(sample.x in 0 until width && sample.y in 0 until height)
+                    require(sample.red in 0..255 && sample.green in 0..255 && sample.blue in 0..255)
+                    samples += sample
+                }
+                val threshold = item.getDouble("threshold")
+                require(threshold.isFinite())
+                val target = ImageTarget(
+                    name = name,
+                    width = width,
+                    height = height,
+                    samples = samples,
+                    roiLeft = item.getInt("roi_left"),
+                    roiTop = item.getInt("roi_top"),
+                    roiRight = item.getInt("roi_right"),
+                    roiBottom = item.getInt("roi_bottom"),
+                    threshold = threshold.coerceIn(0.50, 0.999)
+                )
+                targets[normalizeName(name)] = target
+            }
+        }
+    }
+
     private fun normalizeName(value: String): String = value.trim().lowercase(Locale.ROOT)
 
     private const val SAMPLE_GRID = 8
@@ -501,4 +600,6 @@ object ImageTargetRuntime {
     private const val MAX_ENCODED_IMAGE_CHARS = 12 * 1024 * 1024
     private const val MAX_IMAGE_BYTES = 8 * 1024 * 1024
     private const val MAX_TEMPLATE_PIXELS = 16_000_000L
+    private const val PREFERENCES_NAME = "image_targets"
+    private const val PREFERENCES_KEY_TARGETS = "targets_v1"
 }

@@ -15,7 +15,10 @@ import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
 
 class AgentCommandProvider : ContentProvider() {
-    override fun onCreate(): Boolean = true
+    override fun onCreate(): Boolean {
+        context?.let(ImageTargetRuntime::initialize)
+        return true
+    }
 
     override fun query(
         uri: Uri,
