@@ -122,6 +122,7 @@ class TronangControlApp:
         self.backend = WebSocketBackend(self.events)
         self.command_ids = itertools.count(1)
         self.pending = {}
+        self.active_image_requests = {}
         self.device_vars = {}
         self.device_labels = {}
         self.device_widgets = {}
@@ -583,6 +584,7 @@ class TronangControlApp:
         self._schedule_screen_render()
         for key in [key for key in self.pending if key[1] == client_id]:
             self.pending.pop(key, None)
+        self.active_image_requests.pop(client_id, None)
         self.client_status_var.set(f"{len(self.device_vars)} điện thoại")
 
     def _clear_devices(self):
@@ -663,6 +665,9 @@ class TronangControlApp:
                 )
             self._log(f"[{client_id}] IMAGE PUT: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "image_click_timing":
+            active = self.active_image_requests.get(client_id)
+            if active and active.get("request_id") == str(obj.get("request_id")):
+                active["reported"] = True
             self._log(
                 f"[{client_id} {obj.get('request_id')}] IMAGE CLICK TIMING "
                 f"name={obj.get('name')} find={obj.get('find_ms')}ms "
@@ -671,10 +676,32 @@ class TronangControlApp:
                 f"match_to_click={obj.get('match_to_click_ms')}ms "
                 f"total={obj.get('total_ms')}ms success={obj.get('success')}"
             )
+        elif message_type == "image_match":
+            active = self.active_image_requests.get(client_id)
+            timestamp_ms = obj.get("timestamp_ms")
+            if active and isinstance(timestamp_ms, (int, float)):
+                active["matched_phone_ms"] = timestamp_ms
+            request_id = active.get("request_id") if active else "?"
+            self._log(
+                f"[{client_id} {request_id}] IMAGE MATCH name={obj.get('name')} "
+                f"score={obj.get('score')} phone_ms={timestamp_ms} "
+                f"point={obj.get('x')},{obj.get('y')}"
+            )
         elif message_type == "ready":
             self.device_summary_var.set(f"Thiết bị sẵn sàng: {len(self.device_vars)}")
             self._log(f"[{client_id} • {label}] READY: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "workflow":
+            request_id = obj.get("request_id")
+            if obj.get("command") == "CLICK_IMG" and request_id is not None:
+                request_id = str(request_id)
+                active = self.active_image_requests.get(client_id)
+                if not active or active.get("request_id") != request_id:
+                    self.active_image_requests[client_id] = {
+                        "request_id": request_id,
+                        "name": obj.get("target"),
+                        "matched_phone_ms": None,
+                        "reported": False,
+                    }
             self._log(
                 f"[{client_id} • {label}] WORKFLOW "
                 f"id={obj.get('request_id')} state={obj.get('state')} "
@@ -946,14 +973,32 @@ class TronangControlApp:
     def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))
         state = str(obj.get("state", "?"))
+        phone_ms = obj.get("phone_ms")
+        active = self.active_image_requests.get(client_id)
+        timing_details = ""
+        if (
+            state in {"completed", "failed", "stopped", "cancelled"}
+            and active
+            and active.get("request_id") == request_id
+        ):
+            matched_phone_ms = active.get("matched_phone_ms")
+            if (
+                state == "completed"
+                and not active.get("reported")
+                and isinstance(phone_ms, (int, float))
+                and isinstance(matched_phone_ms, (int, float))
+            ):
+                timing_details = (
+                    f" detect_to_complete={phone_ms - matched_phone_ms:.1f}ms"
+                )
+            self.active_image_requests.pop(client_id, None)
         item = self.pending.get((request_id, client_id))
         prefix = f"[{client_id} {request_id}]"
         if not item:
-            self._log(f"{prefix} {state.upper()} phone_ms={obj.get('phone_ms')}")
+            self._log(f"{prefix} {state.upper()} phone_ms={phone_ms}{timing_details}")
             return
         elapsed = (time.perf_counter() - item["sent"]) * 1000.0
-        phone_ms = obj.get("phone_ms")
-        details = ""
+        details = timing_details
         if state == "received":
             item["received_phone_ms"] = phone_ms
         elif state == "started":
