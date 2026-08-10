@@ -927,7 +927,12 @@ class TronangControlApp:
             f"[{client_id}] CREATE IMAGE {payload['name']} template={left},{top},{right},{bottom} "
             f"roi=±{margin}px threshold={payload['threshold']}"
         )
-        self.toggle_sample_mode()
+        self.sample_mode = False
+        self.sample_button_var.set("Tạo ảnh mẫu")
+        self.stream_status_var.set(f"{client_id}: đang tạo mẫu {payload['name']}…")
+        for widget in self.screen_labels.values():
+            widget.delete("sample_selection")
+            widget.configure(cursor="hand2")
 
     def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))
