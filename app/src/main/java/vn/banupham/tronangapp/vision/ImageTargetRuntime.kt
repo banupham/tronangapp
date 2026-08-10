@@ -132,6 +132,63 @@ object ImageTargetRuntime {
         }
     }
 
+    fun registerFromFrame(
+        name: String,
+        image: Image,
+        screenWidth: Int,
+        screenHeight: Int,
+        templateLeft: Int,
+        templateTop: Int,
+        templateRight: Int,
+        templateBottom: Int,
+        roiLeft: Int,
+        roiTop: Int,
+        roiRight: Int,
+        roiBottom: Int,
+        threshold: Double
+    ): Result<ImageTarget> = runCatching {
+        val cleanName = name.trim()
+        require(cleanName.isNotEmpty()) { "image_name_required" }
+        require(
+            templateLeft >= 0 && templateTop >= 0 &&
+                templateRight <= screenWidth && templateBottom <= screenHeight &&
+                templateRight > templateLeft && templateBottom > templateTop
+        ) { "image_template_bounds_invalid" }
+
+        val plane = image.planes.firstOrNull() ?: error("image_plane_missing")
+        require(plane.pixelStride >= 3 && plane.rowStride > 0) { "image_plane_invalid" }
+        val buffer = plane.buffer
+        val templateWidth = templateRight - templateLeft
+        val templateHeight = templateBottom - templateTop
+        val samples = buildSamples(templateWidth, templateHeight) { x, y ->
+            val offset = (templateTop + y) * plane.rowStride +
+                (templateLeft + x) * plane.pixelStride
+            require(offset >= 0 && offset + 2 < buffer.limit()) { "image_sample_out_of_bounds" }
+            Color.rgb(
+                buffer.get(offset).toInt() and 0xFF,
+                buffer.get(offset + 1).toInt() and 0xFF,
+                buffer.get(offset + 2).toInt() and 0xFF
+            )
+        }
+        require(samples.isNotEmpty()) { "image_has_no_usable_pixels" }
+        val safeThreshold = if (threshold.isFinite()) threshold.coerceIn(0.50, 0.999) else 0.90
+        val target = ImageTarget(
+            name = cleanName,
+            width = templateWidth,
+            height = templateHeight,
+            samples = samples,
+            roiLeft = roiLeft.coerceIn(0, screenWidth),
+            roiTop = roiTop.coerceIn(0, screenHeight),
+            roiRight = roiRight.coerceIn(0, screenWidth),
+            roiBottom = roiBottom.coerceIn(0, screenHeight),
+            threshold = safeThreshold
+        )
+        val key = normalizeName(cleanName)
+        targets[key] = target
+        lastSuccessfulMatches.remove(key)
+        target
+    }
+
     fun remove(name: String): Boolean {
         val key = normalizeName(name)
         if (activeWatch == key) activeWatch = null

@@ -139,6 +139,8 @@ class TronangControlApp:
         self.screen_geometry = {}
         self.screen_render_job = None
         self.closing = False
+        self.sample_mode = False
+        self.sample_drag = None
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -158,6 +160,10 @@ class TronangControlApp:
         self.stream_width_var = tk.StringVar(value="360")
         self.stream_quality_var = tk.StringVar(value="55")
         self.display_width_var = tk.StringVar(value="100")
+        self.sample_name_var = tk.StringVar(value="MAU_1")
+        self.sample_threshold_var = tk.StringVar(value="0.90")
+        self.sample_margin_var = tk.StringVar(value="120")
+        self.sample_button_var = tk.StringVar(value="Tạo ảnh mẫu")
         self.stream_status_var = tk.StringVar(value="Chế độ xem đang tắt")
 
         self._build_ui()
@@ -345,6 +351,25 @@ class TronangControlApp:
             side=tk.LEFT, padx=4
         )
         ttk.Label(toolbar, textvariable=self.stream_status_var).pack(side=tk.RIGHT)
+
+        samplebar = ttk.LabelFrame(parent, text="Tạo mẫu tìm ảnh từ frame gốc", padding=5)
+        samplebar.pack(fill=tk.X, pady=(0, 6))
+        for label, variable, width in (
+            ("Tên", self.sample_name_var, 16),
+            ("Ngưỡng", self.sample_threshold_var, 6),
+            ("ROI ±px", self.sample_margin_var, 7),
+        ):
+            ttk.Label(samplebar, text=label).pack(side=tk.LEFT, padx=(4, 2))
+            ttk.Entry(samplebar, textvariable=variable, width=width).pack(side=tk.LEFT)
+        ttk.Button(
+            samplebar,
+            textvariable=self.sample_button_var,
+            command=self.toggle_sample_mode,
+        ).pack(side=tk.LEFT, padx=8)
+        ttk.Label(
+            samplebar,
+            text="Bật rồi kéo chuột khoanh đối tượng trên một màn hình",
+        ).pack(side=tk.LEFT)
 
         self.screen_grid = ttk.Frame(parent)
         self.screen_grid.pack(fill=tk.BOTH, expand=True)
@@ -630,6 +655,13 @@ class TronangControlApp:
         elif message_type == "screen_stream":
             self.stream_status_var.set(f"{client_id}: {obj.get('state')}")
             self._log(f"[{client_id}] SCREEN {obj.get('state')}")
+        elif message_type == "image_put":
+            if obj.get("success"):
+                self.stream_status_var.set(
+                    f"{client_id}: đã tạo mẫu {obj.get('name')} "
+                    f"({obj.get('width')}x{obj.get('height')})"
+                )
+            self._log(f"[{client_id}] IMAGE PUT: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "ready":
             self.device_summary_var.set(f"Thiết bị sẵn sàng: {len(self.device_vars)}")
             self._log(f"[{client_id} • {label}] READY: {json.dumps(obj, ensure_ascii=False)}")
@@ -688,9 +720,20 @@ class TronangControlApp:
             row = position // 2
             self.screen_grid.rowconfigure(row, weight=1)
             frame.grid(row=row, column=position % 2, padx=4, pady=4, sticky="nsew")
-            widget = ttk.Label(frame, anchor=tk.CENTER)
+            widget = tk.Canvas(frame, background="#202020", highlightthickness=0)
             widget.pack(fill=tk.BOTH, expand=True)
-            widget.bind("<Button-1>", lambda event, device=client_id: self._click_screen(device, event))
+            widget.bind(
+                "<Button-1>",
+                lambda event, device=client_id: self._screen_pointer_down(device, event),
+            )
+            widget.bind(
+                "<B1-Motion>",
+                lambda event, device=client_id: self._screen_pointer_drag(device, event),
+            )
+            widget.bind(
+                "<ButtonRelease-1>",
+                lambda event, device=client_id: self._screen_pointer_up(device, event),
+            )
             widget.configure(cursor="hand2")
             self.screen_labels[client_id] = widget
         self.screen_source_images[client_id] = image
@@ -753,7 +796,15 @@ class TronangControlApp:
         )
         photo = ImageTk.PhotoImage(rendered)
         self.screen_images[client_id] = photo
-        widget.configure(image=photo)
+        widget.delete("frame_image")
+        widget.create_image(
+            widget.winfo_width() // 2,
+            widget.winfo_height() // 2,
+            image=photo,
+            anchor=tk.CENTER,
+            tags="frame_image",
+        )
+        widget.tag_lower("frame_image")
         source_width, source_height, _, _ = self.screen_geometry[client_id]
         self.screen_geometry[client_id] = (source_width, source_height, width, height)
 
@@ -769,21 +820,114 @@ class TronangControlApp:
         )
 
     def _click_screen(self, client_id, event):
+        mapped = self._screen_point_to_source(client_id, event.x, event.y)
+        if mapped is None:
+            return
+        target_x, target_y, image_x, image_y = mapped
+        self._log(f"[{client_id}] FRAME CLICK ({image_x},{image_y}) -> TAP:{target_x},{target_y}")
+        self.send_workflow(f"TAP:{target_x},{target_y}", [client_id])
+
+    def _screen_point_to_source(self, client_id, x, y):
         geometry = self.screen_geometry.get(client_id)
         widget = self.screen_labels.get(client_id)
         if geometry is None or widget is None:
-            return
+            return None
         source_width, source_height, rendered_width, rendered_height = geometry
         left = max(0, (widget.winfo_width() - rendered_width) // 2)
         top = max(0, (widget.winfo_height() - rendered_height) // 2)
-        image_x = event.x - left
-        image_y = event.y - top
+        image_x = x - left
+        image_y = y - top
         if not (0 <= image_x < rendered_width and 0 <= image_y < rendered_height):
-            return
+            return None
         target_x = min(source_width - 1, round(image_x * source_width / rendered_width))
         target_y = min(source_height - 1, round(image_y * source_height / rendered_height))
-        self._log(f"[{client_id}] FRAME CLICK ({image_x},{image_y}) -> TAP:{target_x},{target_y}")
-        self.send_workflow(f"TAP:{target_x},{target_y}", [client_id])
+        return target_x, target_y, image_x, image_y
+
+    def toggle_sample_mode(self):
+        if not self.sample_mode:
+            name = self.sample_name_var.get().strip()
+            try:
+                threshold = float(self.sample_threshold_var.get())
+                margin = int(self.sample_margin_var.get())
+            except ValueError:
+                messagebox.showerror("Tạo ảnh mẫu", "Ngưỡng và ROI phải là số")
+                return
+            if not name:
+                messagebox.showerror("Tạo ảnh mẫu", "Tên mẫu không được để trống")
+                return
+            if not 0.50 <= threshold <= 0.999 or not 0 <= margin <= 5000:
+                messagebox.showerror("Tạo ảnh mẫu", "Ngưỡng 0.50–0.999; ROI 0–5000 px")
+                return
+        self.sample_mode = not self.sample_mode
+        self.sample_drag = None
+        self.sample_button_var.set("Hủy tạo mẫu" if self.sample_mode else "Tạo ảnh mẫu")
+        self.stream_status_var.set(
+            "Kéo khoanh vùng ảnh mẫu" if self.sample_mode else "Đã hủy tạo ảnh mẫu"
+        )
+        for widget in self.screen_labels.values():
+            widget.delete("sample_selection")
+            widget.configure(cursor="crosshair" if self.sample_mode else "hand2")
+
+    def _screen_pointer_down(self, client_id, event):
+        if not self.sample_mode:
+            self._click_screen(client_id, event)
+            return
+        if self._screen_point_to_source(client_id, event.x, event.y) is None:
+            return
+        self.sample_drag = (client_id, event.x, event.y)
+
+    def _screen_pointer_drag(self, client_id, event):
+        if not self.sample_mode or not self.sample_drag or self.sample_drag[0] != client_id:
+            return
+        widget = self.screen_labels[client_id]
+        _, start_x, start_y = self.sample_drag
+        widget.delete("sample_selection")
+        widget.create_rectangle(
+            start_x,
+            start_y,
+            event.x,
+            event.y,
+            outline="#ff4040",
+            width=2,
+            tags="sample_selection",
+        )
+
+    def _screen_pointer_up(self, client_id, event):
+        if not self.sample_mode or not self.sample_drag or self.sample_drag[0] != client_id:
+            return
+        _, start_x, start_y = self.sample_drag
+        self.sample_drag = None
+        first = self._screen_point_to_source(client_id, start_x, start_y)
+        second = self._screen_point_to_source(client_id, event.x, event.y)
+        if first is None or second is None:
+            return
+        left, right = sorted((first[0], second[0]))
+        top, bottom = sorted((first[1], second[1]))
+        right += 1
+        bottom += 1
+        if right - left < 4 or bottom - top < 4:
+            messagebox.showerror("Tạo ảnh mẫu", "Vùng chọn quá nhỏ")
+            return
+        source_width, source_height, _, _ = self.screen_geometry[client_id]
+        margin = int(self.sample_margin_var.get())
+        payload = {
+            "cmd": "image_capture_put",
+            "name": self.sample_name_var.get().strip(),
+            "threshold": float(self.sample_threshold_var.get()),
+            "template": {"left": left, "top": top, "right": right, "bottom": bottom},
+            "roi": {
+                "left": max(0, left - margin),
+                "top": max(0, top - margin),
+                "right": min(source_width, right + margin),
+                "bottom": min(source_height, bottom + margin),
+            },
+        }
+        self.backend.send(json.dumps(payload, ensure_ascii=False), [client_id])
+        self._log(
+            f"[{client_id}] CREATE IMAGE {payload['name']} template={left},{top},{right},{bottom} "
+            f"roi=±{margin}px threshold={payload['threshold']}"
+        )
+        self.toggle_sample_mode()
 
     def _handle_ack(self, client_id, obj):
         request_id = str(obj.get("id", "?"))

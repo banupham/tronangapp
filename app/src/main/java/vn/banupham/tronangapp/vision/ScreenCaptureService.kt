@@ -45,6 +45,7 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannel()
         startForeground(
             NOTIFICATION_ID,
@@ -253,6 +254,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         stopProjection()
+        if (instance === this) instance = null
         streamExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -333,6 +335,50 @@ class ScreenCaptureService : Service() {
             streamQuality = quality.coerceIn(35, 80)
             streamConsumer = if (enabled) consumer else null
         }
+
+        fun registerImageTarget(
+            name: String,
+            templateLeft: Int,
+            templateTop: Int,
+            templateRight: Int,
+            templateBottom: Int,
+            roiLeft: Int,
+            roiTop: Int,
+            roiRight: Int,
+            roiBottom: Int,
+            threshold: Double,
+            callback: (Result<ImageTargetRuntime.ImageTarget>) -> Unit
+        ): Boolean {
+            val service = instance ?: return false
+            val handler = service.captureHandler ?: return false
+            handler.post {
+                val image = service.latestImage
+                val result = if (image == null) {
+                    Result.failure(IllegalStateException("screen_frame_unavailable"))
+                } else {
+                    ImageTargetRuntime.registerFromFrame(
+                        name,
+                        image,
+                        service.width,
+                        service.height,
+                        templateLeft,
+                        templateTop,
+                        templateRight,
+                        templateBottom,
+                        roiLeft,
+                        roiTop,
+                        roiRight,
+                        roiBottom,
+                        threshold
+                    )
+                }
+                callback(result)
+            }
+            return true
+        }
+
+        @Volatile
+        private var instance: ScreenCaptureService? = null
 
         private const val CHANNEL_ID = "tronangapp_capture"
         private const val NOTIFICATION_ID = 1201

@@ -133,6 +133,15 @@ CLICK_IMG:nut_claim
 
 ## Gửi ảnh mẫu qua socket
 
+Cách nhanh nhất trên giao diện Windows:
+
+1. Mở tab `Màn hình` và bắt đầu xem máy cần tạo mẫu.
+2. Nhập tên mẫu, ngưỡng và biên `ROI ±px`, rồi bấm `Tạo ảnh mẫu`.
+3. Kéo chuột khoanh sát đối tượng ngay trên khung hình của đúng điện thoại.
+4. Khi trạng thái báo đã tạo mẫu, dùng `WAIT_IMG:tên_mẫu` hoặc `CLICK_IMG:tên_mẫu`.
+
+Mẫu được lấy trực tiếp từ frame gốc trên điện thoại, không lấy từ ảnh JPEG thu nhỏ đang hiển thị. `ROI ±px` giới hạn vùng tìm quanh vị trí mẫu để tăng tốc; đặt `0` nếu vật thể không di chuyển, hoặc tăng biên nếu vị trí có thể thay đổi.
+
 Socket nhận JSON `image_put`:
 
 ```json

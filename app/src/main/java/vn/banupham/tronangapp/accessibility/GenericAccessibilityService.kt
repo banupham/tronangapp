@@ -579,6 +579,8 @@ class GenericAccessibilityService : AccessibilityService() {
 
             "image_put" -> registerImageFromSocket(json)
 
+            "image_capture_put" -> registerImageFromCurrentFrame(json)
+
             "image_remove" -> {
                 val name = json.optString("name")
                 val removed = name.isNotBlank() && ImageTargetRuntime.remove(name)
@@ -749,6 +751,51 @@ class GenericAccessibilityService : AccessibilityService() {
             )
             remoteSocket.send(response)
         }
+    }
+
+    private fun registerImageFromCurrentFrame(json: JSONObject) {
+        val name = json.optString("name").trim()
+        val template = json.optJSONObject("template")
+        val roi = json.optJSONObject("roi")
+        if (name.isBlank() || template == null || roi == null) {
+            remoteSocket.send(errorJson("image_capture_requires_name_template_roi"))
+            return
+        }
+        val started = ScreenCaptureService.registerImageTarget(
+            name = name,
+            templateLeft = template.optInt("left", -1),
+            templateTop = template.optInt("top", -1),
+            templateRight = template.optInt("right", -1),
+            templateBottom = template.optInt("bottom", -1),
+            roiLeft = roi.optInt("left", 0),
+            roiTop = roi.optInt("top", 0),
+            roiRight = roi.optInt("right", ScreenCaptureService.captureWidth),
+            roiBottom = roi.optInt("bottom", ScreenCaptureService.captureHeight),
+            threshold = json.optDouble("threshold", DEFAULT_IMAGE_THRESHOLD)
+        ) { result ->
+            val response = result.fold(
+                onSuccess = { target ->
+                    JSONObject().apply {
+                        put("type", "image_put")
+                        put("source", "screen_capture")
+                        put("success", true)
+                        put("name", target.name)
+                        put("width", target.width)
+                        put("height", target.height)
+                        put("threshold", target.threshold)
+                        put("roi", JSONObject().apply {
+                            put("left", target.roiLeft)
+                            put("top", target.roiTop)
+                            put("right", target.roiRight)
+                            put("bottom", target.roiBottom)
+                        })
+                    }.toString()
+                },
+                onFailure = { error -> errorJson(error.message ?: "image_capture_failed") }
+            )
+            remoteSocket.send(response)
+        }
+        if (!started) remoteSocket.send(errorJson("screen_capture_not_running"))
     }
 
     private fun sendNodesSnapshot(request: JSONObject) {
