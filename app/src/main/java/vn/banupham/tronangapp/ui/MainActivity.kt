@@ -19,15 +19,23 @@ import android.view.ViewGroup
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.AutomationMode
+import vn.banupham.tronangapp.runtime.AutomationPlan
+import vn.banupham.tronangapp.runtime.AutomationPlanItem
+import vn.banupham.tronangapp.runtime.AutomationPlanScheduler
+import vn.banupham.tronangapp.runtime.AutomationPlanStore
 import vn.banupham.tronangapp.runtime.AppProfileLauncher
 import vn.banupham.tronangapp.runtime.LaunchableAppTarget
 import vn.banupham.tronangapp.runtime.SavedWorkflow
@@ -48,6 +56,13 @@ class MainActivity : Activity() {
     private lateinit var workflowTargetSpinner: Spinner
     private lateinit var workflowLibrary: LinearLayout
     private lateinit var workflowLibraryStatus: TextView
+    private lateinit var planNameInput: EditText
+    private lateinit var planItemsInput: EditText
+    private lateinit var planScheduleSpinner: Spinner
+    private lateinit var planTimeInput: EditText
+    private lateinit var planEnabledInput: CheckBox
+    private lateinit var planLibrary: LinearLayout
+    private lateinit var planStatus: TextView
     private var launchTargets: List<LaunchableAppTarget> = emptyList()
     private var socketFieldsInitialized = false
     private val handler = Handler(Looper.getMainLooper())
@@ -65,6 +80,7 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(buildContent()) })
         refreshLaunchTargets()
         refreshWorkflowLibrary()
+        refreshAutomationPlanLibrary()
         handleAutoCaptureIntent(intent)
     }
 
@@ -238,6 +254,73 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
         }
         addView(workflowLibrary, matchWrap())
+
+        addView(TextView(context).apply {
+            text = "Kế hoạch tự động"
+            textSize = 18f
+            setPadding(0, 28, 0, 8)
+        }, matchWrap())
+
+        addView(TextView(context).apply {
+            text = "Mỗi dòng: Tên workflow|số lượt. Các dòng chạy tuần tự từ trên xuống."
+            textSize = 14f
+        }, matchWrap())
+
+        planNameInput = EditText(context).apply {
+            hint = "Tên kế hoạch"
+            setSingleLine(true)
+        }
+        addView(planNameInput, matchWrap())
+
+        planItemsInput = EditText(context).apply {
+            hint = "Điểm danh|1\nXem video|60"
+            minLines = 3
+            gravity = Gravity.TOP
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        addView(planItemsInput, matchWrap())
+
+        planScheduleSpinner = Spinner(context).apply {
+            adapter = ArrayAdapter(
+                context,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("manual", "once", "daily")
+            )
+        }
+        addView(planScheduleSpinner, matchWrap())
+
+        planTimeInput = EditText(context).apply {
+            hint = "once: 2026-08-18 08:30 | daily: 08:30"
+            setSingleLine(true)
+        }
+        addView(planTimeInput, matchWrap())
+
+        planEnabledInput = CheckBox(context).apply {
+            text = "Bật lịch"
+            isChecked = true
+        }
+        addView(planEnabledInput, matchWrap())
+
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(context).apply {
+                text = "Lưu / ghi đè lịch"
+                setOnClickListener { saveAutomationPlanFromUi() }
+            }, weightedWrap())
+            addView(Button(context).apply {
+                text = "Làm mới lịch"
+                setOnClickListener { refreshAutomationPlanLibrary() }
+            }, weightedWrap())
+        }, matchWrap())
+
+        planStatus = TextView(context).apply {
+            textSize = 14f
+            setPadding(0, 8, 0, 8)
+        }
+        addView(planStatus, matchWrap())
+
+        planLibrary = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        addView(planLibrary, matchWrap())
 
         addView(TextView(context).apply {
             text = "CMD:\nadb shell content query --uri content://vn.banupham.tronangapp.commands/status\n\nadb shell content query --uri content://vn.banupham.tronangapp.commands/nodes\n\nadb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg \"BACK;SLEEP:0.5;HOME\""
@@ -423,6 +506,153 @@ class MainActivity : Activity() {
         }
         workflowTargetSpinner.setSelection(if (targetIndex >= 0) targetIndex + 1 else 0)
         workflowLibraryStatus.text = "Đang sửa: ${workflow.name}"
+    }
+
+    private fun saveAutomationPlanFromUi() {
+        val name = planNameInput.text.toString().trim()
+        val items = parseAutomationPlanItems() ?: return
+        val scheduleType = planScheduleSpinner.selectedItem?.toString().orEmpty()
+        val timeText = planTimeInput.text.toString().trim()
+        var runAtMillis: Long? = null
+        var hour: Int? = null
+        var minute: Int? = null
+        when (scheduleType) {
+            "once" -> {
+                val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).apply {
+                    isLenient = false
+                }
+                runAtMillis = runCatching { formatter.parse(timeText)?.time }.getOrNull()
+                if (runAtMillis == null || runAtMillis <= System.currentTimeMillis()) {
+                    planStatus.text = "Ngày giờ phải có dạng YYYY-MM-DD HH:MM và ở tương lai"
+                    return
+                }
+            }
+            "daily" -> {
+                val parts = timeText.split(':')
+                hour = parts.getOrNull(0)?.toIntOrNull()
+                minute = parts.getOrNull(1)?.toIntOrNull()
+                if (parts.size != 2 || hour !in 0..23 || minute !in 0..59) {
+                    planStatus.text = "Giờ hằng ngày phải có dạng HH:MM"
+                    return
+                }
+            }
+        }
+        val plan = AutomationPlan(
+            name = name,
+            items = items,
+            scheduleType = scheduleType,
+            runAtMillis = runAtMillis,
+            hour = hour,
+            minute = minute,
+            enabled = planEnabledInput.isChecked
+        )
+        val workflowsExist = items.all { SavedWorkflowStore.find(this, it.workflowName) != null }
+        if (name.isBlank() || !workflowsExist || !AutomationPlanStore.save(this, plan)) {
+            planStatus.text = if (!workflowsExist) {
+                "Có tên workflow chưa được lưu trong thư viện"
+            } else {
+                "Tên hoặc nội dung kế hoạch không hợp lệ"
+            }
+            return
+        }
+        val scheduled = AutomationPlanScheduler.schedule(this, plan)
+        planStatus.text = if (scheduled) "Đã lưu kế hoạch: $name" else "Không thể đặt lịch: $name"
+        refreshAutomationPlanLibrary()
+    }
+
+    private fun parseAutomationPlanItems(): List<AutomationPlanItem>? {
+        val items = ArrayList<AutomationPlanItem>()
+        planItemsInput.text.toString().lineSequence().map(String::trim).filter(String::isNotEmpty)
+            .forEach { line ->
+                val separator = line.lastIndexOf('|')
+                val workflowName = if (separator > 0) line.substring(0, separator).trim() else ""
+                val repetitions = if (separator > 0) line.substring(separator + 1).trim().toIntOrNull() else null
+                if (workflowName.isBlank() || repetitions !in 1..100) {
+                    planStatus.text = "Dòng không hợp lệ: $line (dùng Tên workflow|1..100)"
+                    return null
+                }
+                items += AutomationPlanItem(workflowName, repetitions!!)
+            }
+        if (items.isEmpty() || items.sumOf { it.repetitions } > 1_000) {
+            planStatus.text = "Cần ít nhất một workflow; tổng số lượt tối đa là 1000"
+            return null
+        }
+        return items
+    }
+
+    private fun refreshAutomationPlanLibrary() {
+        planLibrary.removeAllViews()
+        val plans = AutomationPlanStore.list(this)
+        if (plans.isEmpty()) {
+            planLibrary.addView(TextView(this).apply { text = "Chưa có kế hoạch tự động" }, matchWrap())
+            return
+        }
+        plans.forEach { plan ->
+            planLibrary.addView(TextView(this).apply {
+                text = buildString {
+                    append(plan.name)
+                    append(if (plan.enabled) " • ĐANG BẬT" else " • ĐÃ TẮT")
+                    append("\n")
+                    append(plan.items.joinToString(" → ") { "${it.workflowName} ×${it.repetitions}" })
+                    append("\nLịch: ")
+                    append(planScheduleLabel(plan))
+                }
+                setTextIsSelectable(true)
+            }, matchWrap())
+            planLibrary.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(Button(context).apply {
+                    text = "Chạy ngay"
+                    setOnClickListener {
+                        val success = GenericAccessibilityService.instance?.runAutomationPlan(plan.name) == true
+                        planStatus.text = if (success) "Đã xếp hàng: ${plan.name}" else "Trợ năng chưa chạy"
+                    }
+                }, weightedWrap())
+                addView(Button(context).apply {
+                    text = "Sửa"
+                    setOnClickListener { editAutomationPlan(plan) }
+                }, weightedWrap())
+                addView(Button(context).apply {
+                    text = if (plan.enabled) "Tắt" else "Bật"
+                    setOnClickListener {
+                        val updated = AutomationPlanStore.setEnabled(this@MainActivity, plan.name, !plan.enabled)
+                        if (updated != null) AutomationPlanScheduler.schedule(this@MainActivity, updated)
+                        refreshAutomationPlanLibrary()
+                    }
+                }, weightedWrap())
+                addView(Button(context).apply {
+                    text = "Xóa"
+                    setOnClickListener {
+                        AutomationPlanScheduler.cancel(this@MainActivity, plan.name)
+                        AutomationPlanStore.remove(this@MainActivity, plan.name)
+                        refreshAutomationPlanLibrary()
+                    }
+                }, weightedWrap())
+            }, matchWrap())
+        }
+    }
+
+    private fun editAutomationPlan(plan: AutomationPlan) {
+        planNameInput.setText(plan.name)
+        planItemsInput.setText(plan.items.joinToString("\n") { "${it.workflowName}|${it.repetitions}" })
+        planScheduleSpinner.setSelection(listOf("manual", "once", "daily").indexOf(plan.scheduleType).coerceAtLeast(0))
+        planTimeInput.setText(
+            when (plan.scheduleType) {
+                "once" -> SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                    .format(Date(plan.runAtMillis ?: 0L))
+                "daily" -> "%02d:%02d".format(plan.hour ?: 0, plan.minute ?: 0)
+                else -> ""
+            }
+        )
+        planEnabledInput.isChecked = plan.enabled
+        planStatus.text = "Đang sửa: ${plan.name}"
+    }
+
+    private fun planScheduleLabel(plan: AutomationPlan): String = when (plan.scheduleType) {
+        "once" -> "một lần " + SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+            .format(Date(plan.runAtMillis ?: 0L))
+        "daily" -> "hằng ngày %02d:%02d".format(plan.hour ?: 0, plan.minute ?: 0)
+        else -> "thủ công"
     }
 
     private fun handleAutoCaptureIntent(intent: Intent?) {
