@@ -3,6 +3,7 @@ package vn.banupham.tronangapp.vision
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -27,6 +28,9 @@ import android.view.WindowManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
+import vn.banupham.tronangapp.runtime.AutomationMode
+import vn.banupham.tronangapp.ui.MainActivity
 
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -55,9 +59,19 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_PAUSE_AUTOMATION -> {
+                applyAutomationMode(true)
+                return START_NOT_STICKY
+            }
+            ACTION_RESUME_AUTOMATION -> {
+                applyAutomationMode(false)
+                return START_NOT_STICKY
+            }
         }
 
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE) ?: Int.MIN_VALUE
@@ -141,7 +155,44 @@ class ScreenCaptureService : Service() {
             captureHandler
         )
         running = true
+        setCapturePaused(AutomationMode.paused)
 
+    }
+
+    private fun applyAutomationMode(paused: Boolean) {
+        val accessibility = GenericAccessibilityService.instance
+        if (accessibility != null) {
+            accessibility.setAutomationPaused(paused)
+        } else {
+            AutomationMode.setPaused(paused)
+            setCapturePaused(paused)
+        }
+        updateNotification()
+    }
+
+    private fun setCapturePaused(paused: Boolean) {
+        captureHandler?.post {
+            if (paused) {
+                configureStream(false)
+                ImageTargetRuntime.clearWatch()
+                runCatching { latestImage?.close() }
+                latestImage = null
+                runCatching { virtualDisplay?.surface = null }
+            } else {
+                val surface = imageReader?.surface
+                if (surface != null && surface.isValid) {
+                    runCatching { virtualDisplay?.surface = surface }
+                }
+            }
+            updateNotification()
+        }
+    }
+
+    private fun updateNotification() {
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            buildNotification()
+        )
     }
 
     private fun maybeStreamFrame(image: Image) {
@@ -276,17 +327,43 @@ class ScreenCaptureService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val paused = AutomationMode.paused
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+        val toggleIntent = PendingIntent.getService(
+            this,
+            if (paused) 2 else 1,
+            Intent(this, ScreenCaptureService::class.java).setAction(
+                if (paused) ACTION_RESUME_AUTOMATION else ACTION_PAUSE_AUTOMATION
+            ),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val openIntent = PendingIntent.getActivity(
+            this,
+            3,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        builder.setContentIntent(openIntent)
+        builder.addAction(
+            0,
+            if (paused) "RESUME" else "PAUSE",
+            toggleIntent
+        )
         return builder
             .setContentTitle("Trợ năng App")
             .setContentText("Đang đọc khung hình để tìm ảnh mục tiêu")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentText(
+                if (paused) "PAUSED - tree scan and commands are disabled"
+                else "ACTIVE - ready for commands"
+            )
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .build()
     }
 
@@ -294,6 +371,12 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val ACTION_STOP = "vn.banupham.tronangapp.STOP_CAPTURE"
+        const val ACTION_PAUSE_AUTOMATION = "vn.banupham.tronangapp.PAUSE_AUTOMATION"
+        const val ACTION_RESUME_AUTOMATION = "vn.banupham.tronangapp.RESUME_AUTOMATION"
+
+        fun applyPausedState(paused: Boolean) {
+            instance?.setCapturePaused(paused)
+        }
 
         @Volatile
         var running: Boolean = false

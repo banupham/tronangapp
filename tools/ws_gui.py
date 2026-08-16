@@ -676,6 +676,10 @@ class TronangControlApp:
                 f"match_to_click={obj.get('match_to_click_ms')}ms "
                 f"total={obj.get('total_ms')}ms success={obj.get('success')}"
             )
+        elif message_type == "automation_mode":
+            state = str(obj.get("state", "unknown")).upper()
+            self.device_summary_var.set(f"{client_id}: automation {state}")
+            self._log(f"[{client_id}] AUTOMATION {state}")
         elif message_type == "image_match":
             active = self.active_image_requests.get(client_id)
             timestamp_ms = obj.get("timestamp_ms")

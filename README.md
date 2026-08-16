@@ -343,6 +343,21 @@ Mọi thay đổi trên đường điều khiển realtime cần so sánh log AC
 
 Không gộp số đo mạng với số đo trên điện thoại. Với image workflow, nên chạy lặp lại cùng một target để kiểm tra cả lần quét ROI đầu tiên và fast path từ vị trí match gần nhất.
 
+## ACTIVE / PAUSED
+
+Thông báo foreground của app có công tắc `PAUSE` / `RESUME`:
+
+- `ACTIVE`: nhận workflow, cập nhật Accessibility tree và xử lý frame tìm ảnh.
+- `PAUSED`: giữ quyền trợ năng và socket, nhưng hủy workflow/image watch, bỏ qua Accessibility events và tháo surface screen capture để tránh quét nền.
+- PAUSED chỉ tồn tại trong tiến trình hiện tại; nếu Android khởi tạo lại tiến trình, app trở về ACTIVE để tránh bị khóa điều khiển ngoài ý muốn.
+
+Socket JSON cũng hỗ trợ `automation_status`, `automation_pause`, `automation_resume`. Qua ADB có thể dùng:
+
+```text
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method automation_pause
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method automation_resume
+```
+
 ## Build
 
 ```bash

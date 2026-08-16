@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Process
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.AutomationMode
 import vn.banupham.tronangapp.runtime.WorkflowStatus
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
@@ -60,7 +61,8 @@ class AgentCommandProvider : ContentProvider() {
                     service?.socketUrl(),
                     ScreenCaptureService.running,
                     ImageTargetRuntime.targetCount(),
-                    ImageTargetRuntime.activeWatchName()
+                    ImageTargetRuntime.activeWatchName(),
+                    if (AutomationMode.paused) "paused" else "active"
                 )
             )
         }
@@ -155,6 +157,16 @@ class AgentCommandProvider : ContentProvider() {
 
             "workflow_stop" -> workflowResult(service.stopWorkflow())
 
+            "automation_pause" -> {
+                service.setAutomationPaused(true)
+                result(true).apply { putString("automation_state", "paused") }
+            }
+
+            "automation_resume" -> {
+                service.setAutomationPaused(false)
+                result(true).apply { putString("automation_state", "active") }
+            }
+
             "socket_connect" -> {
                 if (arg.isNullOrBlank()) return result(false, "socket_url_required")
                 val success = service.connectSocket(arg)
@@ -224,7 +236,8 @@ class AgentCommandProvider : ContentProvider() {
             "socket_url",
             "capture_running",
             "image_targets",
-            "image_watch"
+            "image_watch",
+            "automation_state"
         )
 
         private val NODE_COLUMNS = arrayOf(

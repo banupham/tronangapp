@@ -25,6 +25,7 @@ import android.widget.TextView
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.AutomationMode
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
 
@@ -232,6 +233,9 @@ class MainActivity : Activity() {
             }
         }
         runtimeStatus.text = buildString {
+            append("Automation: ")
+            append(if (AutomationMode.paused) "PAUSED" else "ACTIVE")
+            append("\n")
             append("Service: ")
             append(if (service != null) "đã kết nối" else "chưa kết nối")
             append("\nPackage hiện tại: ")

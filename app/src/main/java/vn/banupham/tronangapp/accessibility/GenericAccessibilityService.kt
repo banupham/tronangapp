@@ -17,6 +17,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.AutomationMode
 import vn.banupham.tronangapp.runtime.ImageClickTiming
 import vn.banupham.tronangapp.runtime.NodeSnapshot
 import vn.banupham.tronangapp.runtime.WorkflowEngine
@@ -106,6 +107,7 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (AutomationMode.paused) return
         maybeApproveAutoCaptureConsent(event)
         val label = event?.let { AccessibilityEvent.eventTypeToString(it.eventType) }
 
@@ -280,9 +282,11 @@ class GenericAccessibilityService : AccessibilityService() {
         return normalized
     }
 
-    fun swipe(direction: String): Boolean = dispatchSwipe(direction, callback = null)
+    fun swipe(direction: String): Boolean =
+        !AutomationMode.paused && dispatchSwipe(direction, callback = null)
 
     fun swipeForWorkflow(direction: String, onComplete: (Boolean) -> Unit): Boolean {
+        if (AutomationMode.paused) return false
         val callback = object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 onComplete(true)
@@ -303,6 +307,7 @@ class GenericAccessibilityService : AccessibilityService() {
         durationMs: Long,
         onComplete: (Boolean) -> Unit
     ): Boolean {
+        if (AutomationMode.paused) return false
         val width = resources.displayMetrics.widthPixels
         val height = resources.displayMetrics.heightPixels
         if (
@@ -375,6 +380,7 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     fun tapForWorkflow(x: Int, y: Int, onComplete: (Boolean) -> Unit): Boolean {
+        if (AutomationMode.paused) return false
         val path = Path().apply {
             moveTo(x.toFloat(), y.toFloat())
         }
@@ -396,18 +402,20 @@ class GenericAccessibilityService : AccessibilityService() {
         )
     }
 
-    fun performSystemAction(action: String): Boolean = when (action.lowercase()) {
-        "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
-        "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
-        "recents", "recent" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-        else -> false
-    }
+    fun performSystemAction(action: String): Boolean =
+        if (AutomationMode.paused) false else when (action.lowercase()) {
+            "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
+            "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
+            "recents", "recent" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+            else -> false
+        }
 
     fun delayForWorkflow(delayMs: Long, onComplete: () -> Unit) {
         mainHandler.postDelayed(onComplete, delayMs.coerceAtLeast(0L))
     }
 
     fun clickText(requestedText: String): Boolean {
+        if (AutomationMode.paused) return false
         val expected = AgentRuntime.normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
@@ -442,9 +450,11 @@ class GenericAccessibilityService : AccessibilityService() {
         return false
     }
 
-    fun isTargetReady(requestedText: String): Boolean = AgentRuntime.isReadyTarget(requestedText)
+    fun isTargetReady(requestedText: String): Boolean =
+        !AutomationMode.paused && AgentRuntime.isReadyTarget(requestedText)
 
     fun isTargetReadyInSubtree(start: AccessibilityNodeInfo, requestedText: String): Boolean {
+        if (AutomationMode.paused) return false
         val expected = AgentRuntime.normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
@@ -466,6 +476,7 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     fun clickTextInSubtree(start: AccessibilityNodeInfo, requestedText: String): Boolean {
+        if (AutomationMode.paused) return false
         val expected = AgentRuntime.normalizeForMatch(requestedText)
         if (expected.isBlank()) return false
 
@@ -514,6 +525,7 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     fun startImageWatch(target: String): String? {
+        if (AutomationMode.paused) return "automation_paused"
         if (!ScreenCaptureService.running) return "screen_capture_not_running"
         if (!ImageTargetRuntime.hasTarget(target)) return "image_target_not_registered"
         return if (ImageTargetRuntime.startWatch(target)) null else "image_watch_not_started"
@@ -524,7 +536,11 @@ class GenericAccessibilityService : AccessibilityService() {
     }
 
     fun runWorkflow(script: String, requestId: String? = null): WorkflowStatus =
-        workflowEngine.start(script, requestId)
+        if (AutomationMode.paused) {
+            WorkflowStatus(state = "failed", error = "automation_paused", requestId = requestId)
+        } else {
+            workflowEngine.start(script, requestId)
+        }
 
     fun stopWorkflow(): WorkflowStatus = workflowEngine.stop()
 
@@ -539,6 +555,30 @@ class GenericAccessibilityService : AccessibilityService() {
     fun socketState(): String = remoteSocket.state
 
     fun socketUrl(): String? = remoteSocket.url
+
+    fun setAutomationPaused(paused: Boolean) {
+        if (AutomationMode.paused != paused) {
+            AutomationMode.setPaused(paused)
+            if (paused) {
+                mainHandler.removeCallbacks(snapshotRunnable)
+                snapshotScheduled = false
+                snapshotBurstStartedMs = 0L
+                ImageTargetRuntime.clearWatch()
+                workflowEngine.stop()
+            } else {
+                refreshSnapshot("automation_resumed")
+            }
+        }
+        ScreenCaptureService.applyPausedState(paused)
+        sendAutomationMode()
+    }
+
+    private fun sendAutomationMode() {
+        remoteSocket.send(JSONObject().apply {
+            put("type", "automation_mode")
+            put("state", if (AutomationMode.paused) "paused" else "active")
+        }.toString())
+    }
 
     private fun handleRemoteCommand(rawCommand: String) {
         val command = rawCommand.trim()
@@ -570,6 +610,12 @@ class GenericAccessibilityService : AccessibilityService() {
 
         when (json.optString("cmd").trim().lowercase()) {
             "ping" -> remoteSocket.send("{\"type\":\"pong\"}")
+
+            "automation_status" -> sendAutomationMode()
+
+            "automation_pause" -> setAutomationPaused(true)
+
+            "automation_resume" -> setAutomationPaused(false)
 
             "stop" -> enqueueStop(requestIdFrom(json))
 
@@ -617,6 +663,7 @@ class GenericAccessibilityService : AccessibilityService() {
                 remoteSocket.send(JSONObject().apply {
                     put("type", "capture_status")
                     put("running", ScreenCaptureService.running)
+                    put("automation_state", if (AutomationMode.paused) "paused" else "active")
                     put("capture_width", ScreenCaptureService.captureWidth)
                     put("capture_height", ScreenCaptureService.captureHeight)
                     put("capture_density_dpi", ScreenCaptureService.captureDensityDpi)
@@ -626,7 +673,9 @@ class GenericAccessibilityService : AccessibilityService() {
             }
 
             "screen_stream_start" -> {
-                if (!ScreenCaptureService.running) {
+                if (AutomationMode.paused) {
+                    remoteSocket.send(errorJson("automation_paused"))
+                } else if (!ScreenCaptureService.running) {
                     remoteSocket.send(errorJson("screen_capture_not_running"))
                 } else {
                     val fps = json.optInt("fps", 4).coerceIn(1, 12)
@@ -678,6 +727,10 @@ class GenericAccessibilityService : AccessibilityService() {
 
     private fun enqueueWorkflow(script: String, requestId: String) {
         remoteSocket.send(commandAckJson(requestId, "received"))
+        if (AutomationMode.paused) {
+            remoteSocket.send(commandAckJson(requestId, "failed", "automation_paused"))
+            return
+        }
         mainHandler.postAtFrontOfQueue {
             deferSnapshotForRealtimeCommand()
             remoteSocket.send(commandAckJson(requestId, "started"))
