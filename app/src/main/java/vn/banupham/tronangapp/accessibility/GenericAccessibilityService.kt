@@ -596,7 +596,8 @@ class GenericAccessibilityService : AccessibilityService() {
         while (pendingPlanNames.isNotEmpty()) {
             val name = pendingPlanNames.removeFirst()
             val plan = AutomationPlanStore.find(this, name) ?: continue
-            val scripts = buildPlanScripts(plan) ?: run {
+            val scripts = buildPlanScripts(plan)
+            if (scripts == null) {
                 sendAutomationPlanState(name, "failed", "saved_workflow_not_found")
                 continue
             }
