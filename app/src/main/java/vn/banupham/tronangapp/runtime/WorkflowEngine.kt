@@ -26,6 +26,7 @@ sealed class WorkflowStep {
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
     data class ClickImage(val target: String) : WorkflowStep()
+    data class OpenApp(val packageName: String, val profileSerial: Long?) : WorkflowStep()
     data class Label(val name: String) : WorkflowStep()
     data class Goto(val label: String, var destination: Int = -1) : WorkflowStep()
     data class IfVisible(
@@ -364,6 +365,15 @@ class WorkflowEngine(
                     return
                 }
 
+                is WorkflowStep.OpenApp -> {
+                    setStatus(statusFor("running", step))
+                    if (!service.openPackage(step.packageName, step.profileSerial)) {
+                        failLocked("app_package_or_profile_not_launchable", step)
+                        return
+                    }
+                    index++
+                }
+
                 is WorkflowStep.Label -> index++
 
                 is WorkflowStep.Goto -> index = step.destination
@@ -595,6 +605,7 @@ class WorkflowEngine(
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
         is WorkflowStep.ClickImage -> "CLICK_IMG"
+        is WorkflowStep.OpenApp -> "OPEN_APP"
         is WorkflowStep.Label -> "LABEL"
         is WorkflowStep.Goto -> "GOTO"
         is WorkflowStep.IfVisible -> "IF"
@@ -623,6 +634,9 @@ class WorkflowEngine(
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.WaitImage -> step.target
         is WorkflowStep.ClickImage -> step.target
+        is WorkflowStep.OpenApp ->
+            if (step.profileSerial == null) step.packageName
+            else "${step.packageName}|${step.profileSerial}"
         is WorkflowStep.Label -> step.name
         is WorkflowStep.Goto -> step.label
         is WorkflowStep.IfVisible -> "${step.target}|${step.label}"
@@ -759,6 +773,17 @@ class WorkflowEngine(
                     "CLICK_IMG" -> {
                         require(argument.isNotEmpty()) { "CLICK_IMG_requires_target" }
                         WorkflowStep.ClickImage(argument)
+                    }
+
+                    "OPEN_APP", "OPEN_PACKAGE" -> {
+                        val parts = argument.split('|', limit = 2).map(String::trim)
+                        val packageName = parts.firstOrNull().orEmpty()
+                        require(packageName.matches(Regex("^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+$"))) {
+                            "OPEN_APP_invalid_package"
+                        }
+                        val profileSerial = parts.getOrNull(1)?.takeIf { it.isNotBlank() }?.toLongOrNull()
+                        if (parts.size == 2) require(profileSerial != null) { "OPEN_APP_invalid_profile" }
+                        WorkflowStep.OpenApp(packageName, profileSerial)
                     }
 
                     "SLEEP", "REST", "NGHI", "NGHỈ" -> {

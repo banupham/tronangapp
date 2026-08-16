@@ -343,6 +343,44 @@ Mọi thay đổi trên đường điều khiển realtime cần so sánh log AC
 
 Không gộp số đo mạng với số đo trên điện thoại. Với image workflow, nên chạy lặp lại cùng một target để kiểm tra cả lần quét ROI đầu tiên và fast path từ vị trí match gần nhất.
 
+## ACTIVE / PAUSED
+
+Thông báo foreground của app có công tắc `PAUSE` / `RESUME`:
+
+- `ACTIVE`: nhận workflow, cập nhật Accessibility tree và xử lý frame tìm ảnh.
+- `PAUSED`: giữ quyền trợ năng và socket, nhưng hủy workflow/image watch, bỏ qua Accessibility events và tháo surface screen capture để tránh quét nền.
+- PAUSED chỉ tồn tại trong tiến trình hiện tại; nếu Android khởi tạo lại tiến trình, app trở về ACTIVE để tránh bị khóa điều khiển ngoài ý muốn.
+
+Socket JSON cũng hỗ trợ `automation_status`, `automation_pause`, `automation_resume`. Qua ADB có thể dùng:
+
+```text
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method automation_pause
+adb shell content call --uri content://vn.banupham.tronangapp.commands --method automation_resume
+```
+
+## Thư viện workflow offline và package/profile
+
+App Android có thể lưu nhiều workflow theo tên, chạy lại hoặc xóa từng mục mà không cần kết nối socket. Mỗi workflow có thể gắn với một ứng dụng đích bằng `package_name` và `profile_serial`; khi chạy, app mở đúng launcher activity trong profile đó trước rồi mới thực thi chuỗi lệnh.
+
+Các package/profile mà app có thể truy cập được đọc bằng Android `LauncherApps`. Nếu cùng package tồn tại ở profile cá nhân và profile công việc, danh sách hiển thị hai mục riêng với profile serial khác nhau.
+
+Socket JSON hỗ trợ:
+
+```json
+{"cmd":"workflow_save","name":"Nhan thuong","script":"WAIT:Nhận thưởng;CLICK:Nhận thưởng","package_name":"com.example.app","profile_serial":0}
+{"cmd":"workflow_list"}
+{"cmd":"workflow_run_saved","id":"pc-1","name":"Nhan thuong"}
+{"cmd":"workflow_remove","name":"Nhan thuong"}
+{"cmd":"app_profile_list"}
+{"cmd":"app_open","package_name":"com.example.app","profile_serial":0}
+```
+
+Có thể vừa lưu vừa chạy bằng `{"cmd":"run","save_as":"Tên workflow","script":"...","package_name":"...","profile_serial":0}`. Lệnh workflow trực tiếp cũng hỗ trợ `OPEN_APP:com.example.app|0`; bỏ `|profile_serial` để dùng profile hiện tại.
+
+Trong `tools/ws_gui.py`, tab **Thư viện workflow** hỗ trợ lấy danh sách app/profile từ
+điện thoại, lưu hoặc ghi đè nhiều workflow, nạp để sửa, chạy và xoá từng mục. Các thao
+tác thư viện yêu cầu chọn đúng một điện thoại vì dữ liệu được lưu riêng trên từng máy.
+
 ## Build
 
 ```bash

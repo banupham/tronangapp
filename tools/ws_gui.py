@@ -142,6 +142,10 @@ class TronangControlApp:
         self.closing = False
         self.sample_mode = False
         self.sample_drag = None
+        self.saved_workflow_name_var = tk.StringVar()
+        self.app_profile_var = tk.StringVar(value="Không tự mở ứng dụng")
+        self.app_profile_targets = {}
+        self.saved_workflow_rows = {}
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -204,11 +208,14 @@ class TronangControlApp:
         nodes = ttk.Frame(self.notebook, padding=8)
         logs = ttk.Frame(self.notebook, padding=8)
         screens = ttk.Frame(self.notebook, padding=8)
+        library = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(control, text="Điều khiển")
+        self.notebook.add(library, text="Thư viện workflow")
         self.notebook.add(screens, text="Màn hình")
         self.notebook.add(nodes, text="Nodes")
         self.notebook.add(logs, text="Log / độ trễ")
         self._build_control_tab(control)
+        self._build_library_tab(library)
         self._build_screens_tab(screens)
         self._build_nodes_tab(nodes)
         self._build_log_tab(logs)
@@ -285,6 +292,55 @@ class TronangControlApp:
         self.raw_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.raw_entry.bind("<Return>", lambda _event: self.send_raw())
         ttk.Button(raw_frame, text="Gửi", command=self.send_raw).pack(side=tk.LEFT, padx=(6, 0))
+
+    def _build_library_tab(self, parent):
+        ttk.Label(
+            parent,
+            text="Dữ liệu được lưu trên điện thoại. Hãy chọn đúng 1 điện thoại để thao tác.",
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        editor = ttk.LabelFrame(parent, text="Workflow", padding=8)
+        editor.pack(fill=tk.X)
+        ttk.Label(editor, text="Tên").grid(row=0, column=0, sticky="w")
+        ttk.Entry(editor, textvariable=self.saved_workflow_name_var, width=32).grid(
+            row=0, column=1, sticky="ew", padx=(6, 12)
+        )
+        ttk.Label(editor, text="Ứng dụng / profile").grid(row=0, column=2, sticky="w")
+        self.app_profile_combo = ttk.Combobox(
+            editor, textvariable=self.app_profile_var, state="readonly", width=52
+        )
+        self.app_profile_combo.grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        self.app_profile_combo["values"] = ("Không tự mở ứng dụng",)
+        editor.columnconfigure(1, weight=1)
+        editor.columnconfigure(3, weight=2)
+
+        buttons = ttk.Frame(editor)
+        buttons.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Button(buttons, text="Lấy app/profile", command=self.request_app_profiles).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Làm mới thư viện", command=self.request_saved_workflows).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="Lưu / ghi đè", command=self.save_workflow_to_phone).pack(side=tk.LEFT)
+
+        columns = ("name", "script", "package", "profile")
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=8)
+        self.saved_workflow_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        for column, title, width in (
+            ("name", "Tên", 180), ("script", "Chuỗi hành động", 520),
+            ("package", "Package", 240), ("profile", "Profile serial", 100),
+        ):
+            self.saved_workflow_tree.heading(column, text=title)
+            self.saved_workflow_tree.column(column, width=width, minwidth=70)
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.saved_workflow_tree.yview)
+        self.saved_workflow_tree.configure(yscrollcommand=scroll.set)
+        self.saved_workflow_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.saved_workflow_tree.bind("<Double-1>", lambda _event: self.load_saved_workflow())
+
+        row_actions = ttk.Frame(parent)
+        row_actions.pack(fill=tk.X)
+        ttk.Button(row_actions, text="Nạp để sửa", command=self.load_saved_workflow).pack(side=tk.LEFT)
+        ttk.Button(row_actions, text="Chạy trên điện thoại", command=self.run_saved_workflow).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_actions, text="Xoá khỏi điện thoại", command=self.remove_saved_workflow).pack(side=tk.LEFT)
 
     def _build_nodes_tab(self, parent):
         filters = ttk.Frame(parent)
@@ -407,6 +463,85 @@ class TronangControlApp:
         script = self.workflow_text.get("1.0", tk.END).strip()
         if script:
             self.send_workflow(script)
+
+    def _one_selected_client(self):
+        targets = self._selected_clients()
+        if len(targets) != 1:
+            messagebox.showwarning(
+                "Chọn điện thoại",
+                "Chức năng thư viện yêu cầu chọn đúng 1 điện thoại.",
+            )
+            return None
+        return targets[0]
+
+    def _send_library_command(self, payload):
+        client_id = self._one_selected_client()
+        if client_id is None:
+            return None
+        self.backend.send(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            [client_id],
+        )
+        return client_id
+
+    def request_app_profiles(self):
+        self._send_library_command({"cmd": "app_profile_list"})
+
+    def request_saved_workflows(self):
+        self._send_library_command({"cmd": "workflow_list"})
+
+    def save_workflow_to_phone(self):
+        name = self.saved_workflow_name_var.get().strip()
+        script = self.workflow_text.get("1.0", tk.END).strip()
+        if not name or not script:
+            messagebox.showwarning("Thiếu dữ liệu", "Cần nhập tên và chuỗi workflow.")
+            return
+        payload = {"cmd": "workflow_save", "name": name, "script": script}
+        target = self.app_profile_targets.get(self.app_profile_var.get())
+        if target:
+            payload["package_name"] = target["package_name"]
+            payload["profile_serial"] = target["profile_serial"]
+        self._send_library_command(payload)
+
+    def _selected_saved_workflow(self):
+        selected = self.saved_workflow_tree.selection()
+        if not selected:
+            messagebox.showwarning("Chọn workflow", "Hãy chọn một workflow trong danh sách.")
+            return None
+        return self.saved_workflow_rows.get(selected[0])
+
+    def load_saved_workflow(self):
+        workflow = self._selected_saved_workflow()
+        if not workflow:
+            return
+        self.saved_workflow_name_var.set(workflow.get("name", ""))
+        self.workflow_text.delete("1.0", tk.END)
+        self.workflow_text.insert("1.0", workflow.get("script", ""))
+        package_name = workflow.get("package_name")
+        profile_serial = workflow.get("profile_serial")
+        display = "Không tự mở ứng dụng"
+        for label, target in self.app_profile_targets.items():
+            if target.get("package_name") == package_name and target.get("profile_serial") == profile_serial:
+                display = label
+                break
+        self.app_profile_var.set(display)
+
+    def run_saved_workflow(self):
+        workflow = self._selected_saved_workflow()
+        if not workflow:
+            return
+        request_id = f"pc-{next(self.command_ids)}"
+        self._send_library_command(
+            {"cmd": "workflow_run_saved", "id": request_id, "name": workflow["name"]}
+        )
+
+    def remove_saved_workflow(self):
+        workflow = self._selected_saved_workflow()
+        if not workflow:
+            return
+        if not messagebox.askyesno("Xoá workflow", f"Xoá '{workflow['name']}' khỏi điện thoại?"):
+            return
+        self._send_library_command({"cmd": "workflow_remove", "name": workflow["name"]})
 
     def _custom_swipe_command(self):
         try:
@@ -676,6 +811,18 @@ class TronangControlApp:
                 f"match_to_click={obj.get('match_to_click_ms')}ms "
                 f"total={obj.get('total_ms')}ms success={obj.get('success')}"
             )
+        elif message_type == "automation_mode":
+            state = str(obj.get("state", "unknown")).upper()
+            self.device_summary_var.set(f"{client_id}: automation {state}")
+            self._log(f"[{client_id}] AUTOMATION {state}")
+        elif message_type == "app_profile_list":
+            self._show_app_profiles(client_id, obj.get("apps", []))
+        elif message_type == "workflow_list":
+            self._show_saved_workflows(client_id, obj.get("workflows", []))
+        elif message_type in ("workflow_save", "workflow_remove"):
+            self._log(f"[{client_id}] {message_type.upper()}: {json.dumps(obj, ensure_ascii=False)}")
+            if obj.get("success"):
+                self.backend.send(json.dumps({"cmd": "workflow_list"}), [client_id])
         elif message_type == "image_match":
             active = self.active_image_requests.get(client_id)
             timestamp_ms = obj.get("timestamp_ms")
@@ -711,6 +858,45 @@ class TronangControlApp:
             )
         else:
             self._log(f"[{client_id} • {label}] PHONE: {json.dumps(obj, ensure_ascii=False)}")
+
+    def _show_app_profiles(self, client_id, apps):
+        targets = {}
+        for app in apps if isinstance(apps, list) else []:
+            if not isinstance(app, dict):
+                continue
+            display = (
+                f"{app.get('label') or app.get('package_name')} — "
+                f"{app.get('profile_label')} [{app.get('profile_serial')}] — "
+                f"{app.get('package_name')}"
+            )
+            targets[display] = app
+        self.app_profile_targets = targets
+        values = ["Không tự mở ứng dụng", *sorted(targets, key=str.casefold)]
+        self.app_profile_combo["values"] = values
+        if self.app_profile_var.get() not in values:
+            self.app_profile_var.set(values[0])
+        profiles = {(app.get("profile_label"), app.get("profile_serial")) for app in targets.values()}
+        self._log(f"[{client_id}] APP/PROFILE: {len(targets)} app, {len(profiles)} profile")
+
+    def _show_saved_workflows(self, client_id, workflows):
+        for item in self.saved_workflow_tree.get_children():
+            self.saved_workflow_tree.delete(item)
+        self.saved_workflow_rows.clear()
+        for workflow in workflows if isinstance(workflows, list) else []:
+            if not isinstance(workflow, dict):
+                continue
+            item = self.saved_workflow_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    workflow.get("name", ""),
+                    workflow.get("script", ""),
+                    workflow.get("package_name") or "",
+                    "" if workflow.get("profile_serial") is None else workflow.get("profile_serial"),
+                ),
+            )
+            self.saved_workflow_rows[item] = workflow
+        self._log(f"[{client_id}] WORKFLOW LIBRARY: {len(self.saved_workflow_rows)} mục")
 
     def _queue_screen_frame(self, client_id, obj):
         encoded = obj.get("jpeg")
