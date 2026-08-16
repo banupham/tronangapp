@@ -358,6 +358,23 @@ adb shell content call --uri content://vn.banupham.tronangapp.commands --method 
 adb shell content call --uri content://vn.banupham.tronangapp.commands --method automation_resume
 ```
 
+## Thư viện workflow offline và package/profile
+
+App Android có thể lưu nhiều workflow theo tên, chạy lại hoặc xóa từng mục mà không cần kết nối socket. Mỗi workflow có thể gắn với một ứng dụng đích bằng `package_name` và `profile_serial`; khi chạy, app mở đúng launcher activity trong profile đó trước rồi mới thực thi chuỗi lệnh.
+
+Các package/profile mà app có thể truy cập được đọc bằng Android `LauncherApps`. Nếu cùng package tồn tại ở profile cá nhân và profile công việc, danh sách hiển thị hai mục riêng với profile serial khác nhau.
+
+Socket JSON hỗ trợ:
+
+```json
+{"cmd":"workflow_save","name":"Nhan thuong","script":"WAIT:Nhận thưởng;CLICK:Nhận thưởng","package_name":"com.example.app","profile_serial":0}
+{"cmd":"workflow_list"}
+{"cmd":"workflow_run_saved","id":"pc-1","name":"Nhan thuong"}
+{"cmd":"workflow_remove","name":"Nhan thuong"}
+```
+
+Có thể vừa lưu vừa chạy bằng `{"cmd":"run","save_as":"Tên workflow","script":"...","package_name":"...","profile_serial":0}`. Lệnh workflow trực tiếp cũng hỗ trợ `OPEN_APP:com.example.app|0`; bỏ `|profile_serial` để dùng profile hiện tại.
+
 ## Build
 
 ```bash

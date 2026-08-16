@@ -17,9 +17,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
+import vn.banupham.tronangapp.runtime.AppProfileLauncher
 import vn.banupham.tronangapp.runtime.AutomationMode
 import vn.banupham.tronangapp.runtime.ImageClickTiming
 import vn.banupham.tronangapp.runtime.NodeSnapshot
+import vn.banupham.tronangapp.runtime.SavedWorkflow
+import vn.banupham.tronangapp.runtime.SavedWorkflowStore
 import vn.banupham.tronangapp.runtime.WorkflowEngine
 import vn.banupham.tronangapp.runtime.WorkflowStatus
 import vn.banupham.tronangapp.ui.MainActivity
@@ -556,6 +559,9 @@ class GenericAccessibilityService : AccessibilityService() {
 
     fun socketUrl(): String? = remoteSocket.url
 
+    fun openPackage(packageName: String, profileSerial: Long?): Boolean =
+        !AutomationMode.paused && AppProfileLauncher.launch(this, packageName, profileSerial)
+
     fun setAutomationPaused(paused: Boolean) {
         if (AutomationMode.paused != paused) {
             AutomationMode.setPaused(paused)
@@ -627,7 +633,55 @@ class GenericAccessibilityService : AccessibilityService() {
                     remoteSocket.send(errorJson("empty_workflow"))
                     remoteSocket.send(commandAckJson(requestId, "failed", "empty_workflow"))
                 } else {
-                    enqueueWorkflow(script, requestId)
+                    var scriptToRun = script
+                    val saveAs = json.optString("save_as").trim()
+                    if (saveAs.isNotBlank()) {
+                        val workflow = savedWorkflowFromJson(json, saveAs, script)
+                        val validation = runCatching { WorkflowEngine.parse(workflow.compiledScript()) }
+                        if (validation.isFailure || !SavedWorkflowStore.save(this, workflow)) {
+                            remoteSocket.send(commandAckJson(requestId, "failed", "workflow_save_failed"))
+                            return
+                        }
+                        scriptToRun = workflow.compiledScript()
+                    }
+                    enqueueWorkflow(scriptToRun, requestId)
+                }
+            }
+
+            "workflow_save" -> {
+                val name = json.optString("name").trim()
+                val script = json.optString("script").trim()
+                if (name.isBlank() || script.isBlank()) {
+                    remoteSocket.send(errorJson("workflow_save_requires_name_and_script"))
+                } else {
+                    val workflow = savedWorkflowFromJson(json, name, script)
+                    val valid = runCatching { WorkflowEngine.parse(workflow.compiledScript()) }.isSuccess
+                    val success = valid && SavedWorkflowStore.save(this, workflow)
+                    remoteSocket.send(savedWorkflowResultJson("workflow_save", workflow, success))
+                }
+            }
+
+            "workflow_list" -> sendSavedWorkflowList()
+
+            "workflow_remove" -> {
+                val name = json.optString("name").trim()
+                val removed = name.isNotBlank() && SavedWorkflowStore.remove(this, name)
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "workflow_remove")
+                    put("name", name)
+                    put("success", removed)
+                }.toString())
+            }
+
+            "workflow_run_saved" -> {
+                val requestId = requestIdFrom(json)
+                val name = json.optString("name").trim()
+                val workflow = SavedWorkflowStore.find(this, name)
+                if (workflow == null) {
+                    remoteSocket.send(commandAckJson(requestId, "received"))
+                    remoteSocket.send(commandAckJson(requestId, "failed", "saved_workflow_not_found"))
+                } else {
+                    enqueueWorkflow(workflow.compiledScript(), requestId)
                 }
             }
 
@@ -755,6 +809,44 @@ class GenericAccessibilityService : AccessibilityService() {
         } else {
             raw.toString()
         }
+    }
+
+    private fun savedWorkflowFromJson(json: JSONObject, name: String, script: String): SavedWorkflow {
+        val rawProfile = json.opt("profile_serial")
+        val profileSerial = when {
+            rawProfile == null || rawProfile === JSONObject.NULL || rawProfile.toString().isBlank() -> null
+            else -> rawProfile.toString().toLongOrNull()
+        }
+        return SavedWorkflow(
+            name = name,
+            script = script,
+            packageName = json.optString("package_name").trim().takeIf { it.isNotBlank() },
+            profileSerial = profileSerial
+        )
+    }
+
+    private fun savedWorkflowResultJson(
+        type: String,
+        workflow: SavedWorkflow,
+        success: Boolean
+    ): String = JSONObject().apply {
+        put("type", type)
+        put("success", success)
+        put("name", workflow.name)
+        put("script", workflow.script)
+        put("package_name", workflow.packageName ?: JSONObject.NULL)
+        put("profile_serial", workflow.profileSerial ?: JSONObject.NULL)
+    }.toString()
+
+    private fun sendSavedWorkflowList() {
+        remoteSocket.send(JSONObject().apply {
+            put("type", "workflow_list")
+            put("workflows", JSONArray().apply {
+                SavedWorkflowStore.list(this@GenericAccessibilityService).forEach { workflow ->
+                    put(JSONObject(savedWorkflowResultJson("workflow", workflow, true)))
+                }
+            })
+        }.toString())
     }
 
     private fun nextLegacyRequestId(): String =

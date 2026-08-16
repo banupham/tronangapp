@@ -18,14 +18,21 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.AutomationMode
+import vn.banupham.tronangapp.runtime.AppProfileLauncher
+import vn.banupham.tronangapp.runtime.LaunchableAppTarget
+import vn.banupham.tronangapp.runtime.SavedWorkflow
+import vn.banupham.tronangapp.runtime.SavedWorkflowStore
+import vn.banupham.tronangapp.runtime.WorkflowEngine
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
 
@@ -36,6 +43,12 @@ class MainActivity : Activity() {
     private lateinit var socketPortInput: EditText
     private lateinit var socketControlStatus: TextView
     private lateinit var runtimeStatus: TextView
+    private lateinit var workflowNameInput: EditText
+    private lateinit var workflowScriptInput: EditText
+    private lateinit var workflowTargetSpinner: Spinner
+    private lateinit var workflowLibrary: LinearLayout
+    private lateinit var workflowLibraryStatus: TextView
+    private var launchTargets: List<LaunchableAppTarget> = emptyList()
     private var socketFieldsInitialized = false
     private val handler = Handler(Looper.getMainLooper())
 
@@ -50,6 +63,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         ImageTargetRuntime.initialize(this)
         setContentView(ScrollView(this).apply { addView(buildContent()) })
+        refreshLaunchTargets()
+        refreshWorkflowLibrary()
         handleAutoCaptureIntent(intent)
     }
 
@@ -179,6 +194,52 @@ class MainActivity : Activity() {
         addView(socketControlStatus, matchWrap())
 
         addView(TextView(context).apply {
+            text = "Thư viện workflow offline"
+            textSize = 18f
+            setPadding(0, 24, 0, 8)
+        }, matchWrap())
+
+        workflowNameInput = EditText(context).apply {
+            hint = "Tên workflow"
+            setSingleLine(true)
+        }
+        addView(workflowNameInput, matchWrap())
+
+        workflowScriptInput = EditText(context).apply {
+            hint = "Chuỗi lệnh, ví dụ WAIT:Mở;CLICK:Mở"
+            minLines = 3
+            gravity = Gravity.TOP
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        addView(workflowScriptInput, matchWrap())
+
+        workflowTargetSpinner = Spinner(context)
+        addView(workflowTargetSpinner, matchWrap())
+
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(context).apply {
+                text = "Lưu / ghi đè"
+                setOnClickListener { saveWorkflowFromUi() }
+            }, weightedWrap())
+            addView(Button(context).apply {
+                text = "Làm mới app/profile"
+                setOnClickListener { refreshLaunchTargets() }
+            }, weightedWrap())
+        }, matchWrap())
+
+        workflowLibraryStatus = TextView(context).apply {
+            textSize = 14f
+            setPadding(0, 8, 0, 8)
+        }
+        addView(workflowLibraryStatus, matchWrap())
+
+        workflowLibrary = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        addView(workflowLibrary, matchWrap())
+
+        addView(TextView(context).apply {
             text = "CMD:\nadb shell content query --uri content://vn.banupham.tronangapp.commands/status\n\nadb shell content query --uri content://vn.banupham.tronangapp.commands/nodes\n\nadb shell content call --uri content://vn.banupham.tronangapp.commands --method workflow --arg \"BACK;SLEEP:0.5;HOME\""
             textSize = 14f
             setTextIsSelectable(true)
@@ -262,6 +323,106 @@ class MainActivity : Activity() {
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         @Suppress("DEPRECATION")
         startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE)
+    }
+
+    private fun refreshLaunchTargets() {
+        launchTargets = AppProfileLauncher.listTargets(this)
+        val labels = listOf("Không tự mở ứng dụng") + launchTargets.map(LaunchableAppTarget::toString)
+        workflowTargetSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            labels
+        )
+        workflowLibraryStatus.text = "Đã đọc ${launchTargets.size} package/profile có thể mở"
+    }
+
+    private fun saveWorkflowFromUi() {
+        val name = workflowNameInput.text.toString().trim()
+        val script = workflowScriptInput.text.toString().trim()
+        val target = launchTargets.getOrNull(workflowTargetSpinner.selectedItemPosition - 1)
+        val workflow = SavedWorkflow(
+            name = name,
+            script = script,
+            packageName = target?.packageName,
+            profileSerial = target?.profileSerial
+        )
+        val validation = runCatching { WorkflowEngine.parse(workflow.compiledScript()) }
+        if (name.isBlank() || script.isBlank() || validation.isFailure) {
+            workflowLibraryStatus.text = validation.exceptionOrNull()?.message
+                ?: "Tên và chuỗi workflow không được để trống"
+            return
+        }
+        SavedWorkflowStore.save(this, workflow)
+        workflowLibraryStatus.text = "Đã lưu: $name"
+        refreshWorkflowLibrary()
+    }
+
+    private fun refreshWorkflowLibrary() {
+        workflowLibrary.removeAllViews()
+        val workflows = SavedWorkflowStore.list(this)
+        if (workflows.isEmpty()) {
+            workflowLibrary.addView(TextView(this).apply { text = "Chưa có workflow đã lưu" }, matchWrap())
+            return
+        }
+        workflows.forEach { workflow ->
+            workflowLibrary.addView(TextView(this).apply {
+                text = buildString {
+                    append(workflow.name)
+                    append("\n")
+                    append(workflow.script)
+                    if (!workflow.packageName.isNullOrBlank()) {
+                        append("\nPackage: ")
+                        append(workflow.packageName)
+                        append(" | profile: ")
+                        append(workflow.profileSerial ?: "current")
+                    }
+                }
+                setTextIsSelectable(true)
+            }, matchWrap())
+            workflowLibrary.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(Button(context).apply {
+                    text = "Chạy"
+                    setOnClickListener { runSavedWorkflowFromUi(workflow) }
+                }, weightedWrap())
+                addView(Button(context).apply {
+                    text = "Sửa"
+                    setOnClickListener { editSavedWorkflow(workflow) }
+                }, weightedWrap())
+                addView(Button(context).apply {
+                    text = "Xóa"
+                    setOnClickListener {
+                        SavedWorkflowStore.remove(this@MainActivity, workflow.name)
+                        workflowLibraryStatus.text = "Đã xóa: ${workflow.name}"
+                        refreshWorkflowLibrary()
+                    }
+                }, weightedWrap())
+            }, matchWrap())
+        }
+    }
+
+    private fun runSavedWorkflowFromUi(workflow: SavedWorkflow) {
+        val service = GenericAccessibilityService.instance
+        if (service == null) {
+            workflowLibraryStatus.text = "Dịch vụ trợ năng chưa chạy"
+            return
+        }
+        val status = service.runWorkflow(workflow.compiledScript(), "offline-${System.currentTimeMillis()}")
+        workflowLibraryStatus.text = if (status.state == "failed") {
+            "Không thể chạy: ${status.error}"
+        } else {
+            "Đang chạy: ${workflow.name}"
+        }
+    }
+
+    private fun editSavedWorkflow(workflow: SavedWorkflow) {
+        workflowNameInput.setText(workflow.name)
+        workflowScriptInput.setText(workflow.script)
+        val targetIndex = launchTargets.indexOfFirst {
+            it.packageName == workflow.packageName && it.profileSerial == workflow.profileSerial
+        }
+        workflowTargetSpinner.setSelection(if (targetIndex >= 0) targetIndex + 1 else 0)
+        workflowLibraryStatus.text = "Đang sửa: ${workflow.name}"
     }
 
     private fun handleAutoCaptureIntent(intent: Intent?) {
