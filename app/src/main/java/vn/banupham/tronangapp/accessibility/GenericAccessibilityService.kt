@@ -18,6 +18,9 @@ import org.json.JSONObject
 import vn.banupham.tronangapp.remote.RemoteSocketClient
 import vn.banupham.tronangapp.runtime.AgentRuntime
 import vn.banupham.tronangapp.runtime.AppProfileLauncher
+import vn.banupham.tronangapp.runtime.AutomationPlan
+import vn.banupham.tronangapp.runtime.AutomationPlanScheduler
+import vn.banupham.tronangapp.runtime.AutomationPlanStore
 import vn.banupham.tronangapp.runtime.AutomationMode
 import vn.banupham.tronangapp.runtime.ImageClickTiming
 import vn.banupham.tronangapp.runtime.NodeSnapshot
@@ -28,6 +31,7 @@ import vn.banupham.tronangapp.runtime.WorkflowStatus
 import vn.banupham.tronangapp.ui.MainActivity
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
 import vn.banupham.tronangapp.vision.ScreenCaptureService
+import vn.banupham.tronangapp.receiver.PendingAutomationPlanStore
 
 class GenericAccessibilityService : AccessibilityService() {
     private data class ClickCandidate(
@@ -44,6 +48,10 @@ class GenericAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val backgroundExecutor = Executors.newSingleThreadExecutor()
     private val legacyRequestCounter = AtomicLong(0L)
+    private val pendingPlanNames = ArrayDeque<String>()
+    private val activePlanScripts = ArrayDeque<String>()
+    private var activePlanName: String? = null
+    private var activePlanStep = 0
 
     private var snapshotScheduled = false
     private var snapshotBurstStartedMs = 0L
@@ -87,6 +95,9 @@ class GenericAccessibilityService : AccessibilityService() {
                         )
                     )
                 }
+                if (status.state in TERMINAL_WORKFLOW_STATES) {
+                    mainHandler.post { handlePlanWorkflowTerminal(status) }
+                }
             },
             onImageClickTiming = { timing ->
                 remoteSocket.send(imageClickTimingJson(timing))
@@ -107,6 +118,7 @@ class GenericAccessibilityService : AccessibilityService() {
         remoteSocket.connectSaved()
         refreshSnapshot("service_connected")
         mainHandler.postDelayed({ launchAutoCaptureRequest() }, AUTO_CAPTURE_LAUNCH_DELAY_MS)
+        consumePendingAutomationPlans()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -560,6 +572,97 @@ class GenericAccessibilityService : AccessibilityService() {
 
     fun workflowStatus(): WorkflowStatus = workflowEngine.status
 
+    fun runAutomationPlan(name: String): Boolean {
+        if (AutomationPlanStore.find(this, name) == null) return false
+        if (pendingPlanNames.none { it.equals(name, true) } && !activePlanName.equals(name, true)) {
+            pendingPlanNames.addLast(name)
+        }
+        maybeStartNextAutomationPlan()
+        return true
+    }
+
+    fun consumePendingAutomationPlans() {
+        PendingAutomationPlanStore.drain(this).forEach { name ->
+            if (pendingPlanNames.none { it.equals(name, true) } && !activePlanName.equals(name, true)) {
+                pendingPlanNames.addLast(name)
+            }
+        }
+        maybeStartNextAutomationPlan()
+    }
+
+    private fun maybeStartNextAutomationPlan() {
+        if (AutomationMode.paused || activePlanName != null) return
+        if (workflowEngine.status.state !in TERMINAL_WORKFLOW_STATES + setOf("idle")) return
+        while (pendingPlanNames.isNotEmpty()) {
+            val name = pendingPlanNames.removeFirst()
+            val plan = AutomationPlanStore.find(this, name) ?: continue
+            val scripts = buildPlanScripts(plan) ?: run {
+                sendAutomationPlanState(name, "failed", "saved_workflow_not_found")
+                continue
+            }
+            activePlanName = plan.name
+            activePlanStep = 0
+            activePlanScripts.clear()
+            activePlanScripts.addAll(scripts)
+            sendAutomationPlanState(plan.name, "running", null)
+            startNextAutomationPlanWorkflow()
+            return
+        }
+    }
+
+    private fun buildPlanScripts(plan: AutomationPlan): List<String>? {
+        val workflows = SavedWorkflowStore.list(this).associateBy { it.name.lowercase() }
+        return buildList {
+            plan.items.forEach { item ->
+                val workflow = workflows[item.workflowName.lowercase()] ?: return null
+                repeat(item.repetitions) { add(workflow.compiledScript()) }
+            }
+        }
+    }
+
+    private fun startNextAutomationPlanWorkflow() {
+        val name = activePlanName ?: return
+        if (activePlanScripts.isEmpty()) {
+            sendAutomationPlanState(name, "completed", null)
+            activePlanName = null
+            activePlanStep = 0
+            maybeStartNextAutomationPlan()
+            return
+        }
+        activePlanStep++
+        workflowEngine.start(
+            activePlanScripts.removeFirst(),
+            "plan:${name}:${activePlanStep}:${SystemClock.elapsedRealtime()}"
+        )
+    }
+
+    private fun handlePlanWorkflowTerminal(status: WorkflowStatus) {
+        val name = activePlanName ?: run {
+            maybeStartNextAutomationPlan()
+            return
+        }
+        if (!status.requestId.orEmpty().startsWith("plan:$name:")) return
+        if (status.state == "completed") {
+            startNextAutomationPlanWorkflow()
+        } else {
+            activePlanScripts.clear()
+            activePlanName = null
+            sendAutomationPlanState(name, "failed", status.error ?: status.state)
+            maybeStartNextAutomationPlan()
+        }
+    }
+
+    private fun sendAutomationPlanState(name: String, state: String, error: String?) {
+        remoteSocket.send(JSONObject().apply {
+            put("type", "automation_plan")
+            put("name", name)
+            put("state", state)
+            put("step", activePlanStep)
+            put("remaining", activePlanScripts.size)
+            put("error", error ?: JSONObject.NULL)
+        }.toString())
+    }
+
     fun connectSocket(url: String): Boolean = remoteSocket.connect(url, persist = true)
 
     fun disconnectSocket(clearSavedUrl: Boolean = true) {
@@ -694,6 +797,62 @@ class GenericAccessibilityService : AccessibilityService() {
                 } else {
                     enqueueWorkflow(workflow.compiledScript(), requestId)
                 }
+            }
+
+            "automation_plan_save", "plan_save" -> {
+                val plan = AutomationPlanStore.parse(json)
+                val workflowsExist = plan?.items?.all {
+                    SavedWorkflowStore.find(this, it.workflowName) != null
+                } == true
+                val success = plan != null && workflowsExist &&
+                    AutomationPlanStore.save(this, plan) && AutomationPlanScheduler.schedule(this, plan)
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "automation_plan_save")
+                    put("success", success)
+                    put("name", plan?.name ?: json.optString("name"))
+                    if (!workflowsExist) put("error", "saved_workflow_not_found")
+                }.toString())
+            }
+
+            "automation_plan_list", "plan_list" -> sendAutomationPlanList()
+
+            "automation_plan_remove", "plan_remove" -> {
+                val name = json.optString("name").trim()
+                AutomationPlanScheduler.cancel(this, name)
+                val removed = name.isNotBlank() && AutomationPlanStore.remove(this, name)
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "automation_plan_remove")
+                    put("name", name)
+                    put("success", removed)
+                }.toString())
+            }
+
+            "automation_plan_enable", "plan_enable" -> {
+                val name = json.optString("name").trim()
+                val enabled = json.optBoolean("enabled", true)
+                val plan = AutomationPlanStore.setEnabled(this, name, enabled)
+                val success = plan != null && if (enabled) {
+                    AutomationPlanScheduler.schedule(this, plan)
+                } else {
+                    AutomationPlanScheduler.cancel(this, name)
+                    true
+                }
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "automation_plan_enable")
+                    put("name", name)
+                    put("enabled", enabled)
+                    put("success", success)
+                }.toString())
+            }
+
+            "automation_plan_run", "plan_run" -> {
+                val name = json.optString("name").trim()
+                val success = name.isNotBlank() && runAutomationPlan(name)
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "automation_plan_run")
+                    put("name", name)
+                    put("success", success)
+                }.toString())
             }
 
             "app_profile_list" -> {
@@ -889,6 +1048,17 @@ class GenericAccessibilityService : AccessibilityService() {
             put("workflows", JSONArray().apply {
                 SavedWorkflowStore.list(this@GenericAccessibilityService).forEach { workflow ->
                     put(JSONObject(savedWorkflowResultJson("workflow", workflow, true)))
+                }
+            })
+        }.toString())
+    }
+
+    private fun sendAutomationPlanList() {
+        remoteSocket.send(JSONObject().apply {
+            put("type", "automation_plan_list")
+            put("plans", JSONArray().apply {
+                AutomationPlanStore.list(this@GenericAccessibilityService).forEach { plan ->
+                    put(AutomationPlanStore.toJson(plan))
                 }
             })
         }.toString())

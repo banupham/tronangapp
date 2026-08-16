@@ -390,6 +390,26 @@ IF_NOT_IMG:nhan|BO_QUA_NHAN;CLICK_IMG:nhan;SLEEP_RANDOM:2,5;CLICK_IMG:ok;LABEL:B
 `IF_IMG:tên_mẫu|NHÃN` nhảy khi thấy ảnh; `IF_NOT_IMG:tên_mẫu|NHÃN` nhảy khi không
 thấy ảnh. `SLEEP_RANDOM:min,max` nghỉ ngẫu nhiên trong khoảng giây, từ 0 đến 3600.
 
+### Kế hoạch chạy nhiều workflow và đặt lịch
+
+GUI Windows có tab **Lịch tự động**. Mỗi kế hoạch chứa danh sách workflow đã lưu theo
+thứ tự và số lượt, ví dụ `Điểm danh|1`, `Xem video|60`. Lịch hỗ trợ:
+
+- `manual`: chỉ chạy khi bấm **Chạy ngay**;
+- `once`: chạy một lần theo `YYYY-MM-DD HH:MM`;
+- `daily`: chạy hằng ngày theo `HH:MM`.
+
+Kế hoạch và lịch được lưu trên điện thoại, tự lên lịch lại sau khi máy khởi động. Android
+có thể dịch thời điểm báo thức một chút khi máy đang tiết kiệm pin. Socket JSON tương ứng:
+
+```json
+{"cmd":"automation_plan_save","name":"Buổi sáng","items":[{"workflow":"Điểm danh","repeat":1},{"workflow":"Xem video","repeat":60}],"schedule_type":"daily","hour":8,"minute":30,"enabled":true}
+{"cmd":"automation_plan_list"}
+{"cmd":"automation_plan_run","name":"Buổi sáng"}
+{"cmd":"automation_plan_enable","name":"Buổi sáng","enabled":false}
+{"cmd":"automation_plan_remove","name":"Buổi sáng"}
+```
+
 ## Build
 
 ```bash

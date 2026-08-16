@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox, ttk
 
@@ -180,6 +181,11 @@ class TronangControlApp:
         self.app_profile_targets = {}
         self.saved_workflow_rows = {}
         self.command_guide_filter_var = tk.StringVar()
+        self.plan_name_var = tk.StringVar()
+        self.plan_schedule_type_var = tk.StringVar(value="daily")
+        self.plan_schedule_value_var = tk.StringVar(value="08:00")
+        self.plan_enabled_var = tk.BooleanVar(value=True)
+        self.automation_plan_rows = {}
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -244,16 +250,19 @@ class TronangControlApp:
         screens = ttk.Frame(self.notebook, padding=8)
         library = ttk.Frame(self.notebook, padding=8)
         guide = ttk.Frame(self.notebook, padding=8)
+        planner = ttk.Frame(self.notebook, padding=8)
         self.nodes_tab = nodes
         self.notebook.add(control, text="Điều khiển")
         self.notebook.add(library, text="Thư viện workflow")
         self.notebook.add(guide, text="Hướng dẫn lệnh")
+        self.notebook.add(planner, text="Lịch tự động")
         self.notebook.add(screens, text="Màn hình")
         self.notebook.add(nodes, text="Nodes")
         self.notebook.add(logs, text="Log / độ trễ")
         self._build_control_tab(control)
         self._build_library_tab(library)
         self._build_command_guide_tab(guide)
+        self._build_automation_plan_tab(planner)
         self._build_screens_tab(screens)
         self._build_nodes_tab(nodes)
         self._build_log_tab(logs)
@@ -455,6 +464,66 @@ class TronangControlApp:
         self.root.clipboard_append(syntax)
         self.root.update_idletasks()
 
+    def _build_automation_plan_tab(self, parent):
+        ttk.Label(
+            parent,
+            text="Mỗi dòng: Tên workflow|số lượt. Các dòng được chạy tuần tự từ trên xuống.",
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        editor = ttk.LabelFrame(parent, text="Kế hoạch", padding=8)
+        editor.pack(fill=tk.X)
+        ttk.Label(editor, text="Tên kế hoạch").grid(row=0, column=0, sticky="w")
+        ttk.Entry(editor, textvariable=self.plan_name_var, width=28).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Label(editor, text="Kiểu lịch").grid(row=0, column=2, sticky="w")
+        schedule_combo = ttk.Combobox(
+            editor,
+            textvariable=self.plan_schedule_type_var,
+            values=("manual", "once", "daily"),
+            state="readonly",
+            width=10,
+        )
+        schedule_combo.grid(row=0, column=3, padx=6)
+        ttk.Label(editor, text="Thời gian").grid(row=0, column=4, sticky="w")
+        ttk.Entry(editor, textvariable=self.plan_schedule_value_var, width=18).grid(row=0, column=5, padx=6)
+        ttk.Checkbutton(editor, text="Đang bật", variable=self.plan_enabled_var).grid(row=0, column=6)
+        editor.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            editor,
+            text="once: YYYY-MM-DD HH:MM  •  daily: HH:MM  •  manual: không dùng thời gian",
+        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 4))
+        self.plan_items_text = tk.Text(editor, height=6, wrap=tk.NONE, undo=True)
+        self.plan_items_text.grid(row=2, column=0, columnspan=7, sticky="ew")
+
+        buttons = ttk.Frame(editor)
+        buttons.grid(row=3, column=0, columnspan=7, sticky="w", pady=(8, 0))
+        ttk.Button(buttons, text="Thêm workflow đang chọn", command=self.add_selected_workflow_to_plan).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Lưu / ghi đè kế hoạch", command=self.save_automation_plan).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="Làm mới", command=self.request_automation_plans).pack(side=tk.LEFT)
+
+        columns = ("name", "items", "schedule", "enabled")
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=8)
+        self.automation_plan_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        for column, title, width in (
+            ("name", "Tên", 180), ("items", "Workflow × lượt", 520),
+            ("schedule", "Lịch", 250), ("enabled", "Bật", 70),
+        ):
+            self.automation_plan_tree.heading(column, text=title)
+            self.automation_plan_tree.column(column, width=width, minwidth=70)
+        scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.automation_plan_tree.yview)
+        self.automation_plan_tree.configure(yscrollcommand=scroll.set)
+        self.automation_plan_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.automation_plan_tree.bind("<Double-1>", lambda _event: self.load_automation_plan())
+
+        actions = ttk.Frame(parent)
+        actions.pack(fill=tk.X)
+        ttk.Button(actions, text="Nạp để sửa", command=self.load_automation_plan).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Chạy ngay", command=self.run_automation_plan).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Bật / tắt", command=self.toggle_automation_plan).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Xoá kế hoạch", command=self.remove_automation_plan).pack(side=tk.LEFT, padx=5)
+
     def _build_nodes_tab(self, parent):
         filters = ttk.Frame(parent)
         filters.pack(fill=tk.X, pady=(0, 8))
@@ -655,6 +724,110 @@ class TronangControlApp:
         if not messagebox.askyesno("Xoá workflow", f"Xoá '{workflow['name']}' khỏi điện thoại?"):
             return
         self._send_library_command({"cmd": "workflow_remove", "name": workflow["name"]})
+
+    def add_selected_workflow_to_plan(self):
+        workflow = self._selected_saved_workflow()
+        if not workflow:
+            return
+        current = self.plan_items_text.get("1.0", tk.END).strip()
+        line = f"{workflow['name']}|1"
+        self.plan_items_text.delete("1.0", tk.END)
+        self.plan_items_text.insert("1.0", f"{current}\n{line}" if current else line)
+
+    def request_automation_plans(self):
+        self._send_library_command({"cmd": "automation_plan_list"})
+
+    def _parse_plan_items(self):
+        items = []
+        for raw_line in self.plan_items_text.get("1.0", tk.END).splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            name, separator, repeat_text = line.rpartition("|")
+            if not separator or not name.strip():
+                raise ValueError(f"Dòng không hợp lệ: {line}")
+            repetitions = int(repeat_text.strip())
+            if not 1 <= repetitions <= 100:
+                raise ValueError("Số lượt mỗi workflow phải từ 1 đến 100")
+            items.append({"workflow": name.strip(), "repeat": repetitions})
+        if not items:
+            raise ValueError("Kế hoạch phải có ít nhất một workflow")
+        if sum(item["repeat"] for item in items) > 1000:
+            raise ValueError("Tổng số lượt không được vượt quá 1000")
+        return items
+
+    def save_automation_plan(self):
+        try:
+            items = self._parse_plan_items()
+            payload = {
+                "cmd": "automation_plan_save",
+                "name": self.plan_name_var.get().strip(),
+                "items": items,
+                "schedule_type": self.plan_schedule_type_var.get(),
+                "enabled": self.plan_enabled_var.get(),
+            }
+            if not payload["name"]:
+                raise ValueError("Cần nhập tên kế hoạch")
+            schedule_value = self.plan_schedule_value_var.get().strip()
+            if payload["schedule_type"] == "once":
+                moment = datetime.strptime(schedule_value, "%Y-%m-%d %H:%M")
+                if moment.timestamp() <= time.time():
+                    raise ValueError("Thời gian chạy một lần phải ở tương lai")
+                payload["run_at_ms"] = int(moment.timestamp() * 1000)
+            elif payload["schedule_type"] == "daily":
+                moment = datetime.strptime(schedule_value, "%H:%M")
+                payload["hour"] = moment.hour
+                payload["minute"] = moment.minute
+        except (ValueError, TypeError) as error:
+            messagebox.showerror("Kế hoạch không hợp lệ", str(error))
+            return
+        self._send_library_command(payload)
+
+    def _selected_automation_plan(self):
+        selected = self.automation_plan_tree.selection()
+        if not selected:
+            messagebox.showwarning("Chọn kế hoạch", "Hãy chọn một kế hoạch trong danh sách.")
+            return None
+        return self.automation_plan_rows.get(selected[0])
+
+    def load_automation_plan(self):
+        plan = self._selected_automation_plan()
+        if not plan:
+            return
+        self.plan_name_var.set(plan.get("name", ""))
+        self.plan_schedule_type_var.set(plan.get("schedule_type", "manual"))
+        self.plan_enabled_var.set(bool(plan.get("enabled", True)))
+        if plan.get("schedule_type") == "once" and plan.get("run_at_ms"):
+            value = datetime.fromtimestamp(plan["run_at_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
+        elif plan.get("schedule_type") == "daily":
+            value = f"{int(plan.get('hour', 0)):02d}:{int(plan.get('minute', 0)):02d}"
+        else:
+            value = ""
+        self.plan_schedule_value_var.set(value)
+        lines = [f"{item['workflow']}|{item['repeat']}" for item in plan.get("items", [])]
+        self.plan_items_text.delete("1.0", tk.END)
+        self.plan_items_text.insert("1.0", "\n".join(lines))
+
+    def run_automation_plan(self):
+        plan = self._selected_automation_plan()
+        if plan:
+            self._send_library_command({"cmd": "automation_plan_run", "name": plan["name"]})
+
+    def toggle_automation_plan(self):
+        plan = self._selected_automation_plan()
+        if plan:
+            self._send_library_command({
+                "cmd": "automation_plan_enable",
+                "name": plan["name"],
+                "enabled": not bool(plan.get("enabled", True)),
+            })
+
+    def remove_automation_plan(self):
+        plan = self._selected_automation_plan()
+        if not plan:
+            return
+        if messagebox.askyesno("Xoá kế hoạch", f"Xoá kế hoạch '{plan['name']}'?"):
+            self._send_library_command({"cmd": "automation_plan_remove", "name": plan["name"]})
 
     def _custom_swipe_command(self):
         try:
@@ -936,6 +1109,16 @@ class TronangControlApp:
             self._log(f"[{client_id}] {message_type.upper()}: {json.dumps(obj, ensure_ascii=False)}")
             if obj.get("success"):
                 self.backend.send(json.dumps({"cmd": "workflow_list"}), [client_id])
+        elif message_type == "automation_plan_list":
+            self._show_automation_plans(client_id, obj.get("plans", []))
+        elif message_type in (
+            "automation_plan_save", "automation_plan_remove", "automation_plan_enable",
+        ):
+            self._log(f"[{client_id}] {message_type.upper()}: {json.dumps(obj, ensure_ascii=False)}")
+            if obj.get("success"):
+                self.backend.send(json.dumps({"cmd": "automation_plan_list"}), [client_id])
+        elif message_type in ("automation_plan_run", "automation_plan"):
+            self._log(f"[{client_id}] PLAN: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "image_match":
             active = self.active_image_requests.get(client_id)
             timestamp_ms = obj.get("timestamp_ms")
@@ -1010,6 +1193,32 @@ class TronangControlApp:
             )
             self.saved_workflow_rows[item] = workflow
         self._log(f"[{client_id}] WORKFLOW LIBRARY: {len(self.saved_workflow_rows)} mục")
+
+    def _show_automation_plans(self, client_id, plans):
+        for item in self.automation_plan_tree.get_children():
+            self.automation_plan_tree.delete(item)
+        self.automation_plan_rows.clear()
+        for plan in plans if isinstance(plans, list) else []:
+            if not isinstance(plan, dict):
+                continue
+            items = ", ".join(
+                f"{entry.get('workflow')} ×{entry.get('repeat')}" for entry in plan.get("items", [])
+            )
+            schedule_type = plan.get("schedule_type")
+            if schedule_type == "once" and plan.get("run_at_ms"):
+                schedule = "Một lần " + datetime.fromtimestamp(
+                    plan["run_at_ms"] / 1000
+                ).strftime("%Y-%m-%d %H:%M")
+            elif schedule_type == "daily":
+                schedule = f"Hằng ngày {int(plan.get('hour', 0)):02d}:{int(plan.get('minute', 0)):02d}"
+            else:
+                schedule = "Chạy thủ công"
+            row = self.automation_plan_tree.insert(
+                "", tk.END,
+                values=(plan.get("name", ""), items, schedule, "Có" if plan.get("enabled") else "Không"),
+            )
+            self.automation_plan_rows[row] = plan
+        self._log(f"[{client_id}] AUTOMATION PLANS: {len(self.automation_plan_rows)} kế hoạch")
 
     def _queue_screen_frame(self, client_id, obj):
         encoded = obj.get("jpeg")
