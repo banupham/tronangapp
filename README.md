@@ -371,6 +371,8 @@ Socket JSON hỗ trợ:
 {"cmd":"workflow_list"}
 {"cmd":"workflow_run_saved","id":"pc-1","name":"Nhan thuong"}
 {"cmd":"workflow_remove","name":"Nhan thuong"}
+{"cmd":"app_profile_list"}
+{"cmd":"app_open","package_name":"com.example.app","profile_serial":0}
 ```
 
 Có thể vừa lưu vừa chạy bằng `{"cmd":"run","save_as":"Tên workflow","script":"...","package_name":"...","profile_serial":0}`. Lệnh workflow trực tiếp cũng hỗ trợ `OPEN_APP:com.example.app|0`; bỏ `|profile_serial` để dùng profile hiện tại.

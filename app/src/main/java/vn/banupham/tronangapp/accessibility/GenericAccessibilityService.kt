@@ -685,6 +685,40 @@ class GenericAccessibilityService : AccessibilityService() {
                 }
             }
 
+            "app_profile_list" -> {
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "app_profile_list")
+                    put("apps", JSONArray().apply {
+                        AppProfileLauncher.listTargets(this@GenericAccessibilityService).forEach { target ->
+                            put(JSONObject().apply {
+                                put("label", target.label)
+                                put("package_name", target.packageName)
+                                put("profile_serial", target.profileSerial)
+                                put("profile_label", target.profileLabel)
+                            })
+                        }
+                    })
+                }.toString())
+            }
+
+            "app_open" -> {
+                val packageName = json.optString("package_name").trim()
+                val rawProfile = json.opt("profile_serial")
+                val profileText = rawProfile?.takeUnless { it === JSONObject.NULL }
+                    ?.toString()?.takeIf { it.isNotBlank() }
+                val profileSerial = profileText?.toLongOrNull()
+                val validProfile = profileText == null || profileSerial != null
+                val success = validProfile && packageName.isNotBlank() &&
+                    openPackage(packageName, profileSerial)
+                remoteSocket.send(JSONObject().apply {
+                    put("type", "app_open")
+                    put("success", success)
+                    if (!validProfile) put("error", "invalid_profile_serial")
+                    put("package_name", packageName)
+                    put("profile_serial", profileSerial ?: JSONObject.NULL)
+                }.toString())
+            }
+
             "image_put" -> registerImageFromSocket(json)
 
             "image_capture_put" -> registerImageFromCurrentFrame(json)
