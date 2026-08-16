@@ -18,6 +18,36 @@ MAX_EVENTS_PER_TICK = 100
 NODE_ROWS_PER_TICK = 50
 MAX_LOG_LINES = 5_000
 
+COMMAND_GUIDE = (
+    ("CLICK", "CLICK:Văn bản", "Bấm node theo text hoặc mô tả."),
+    ("CLICK_TIME", "CLICK_TIME", "Bấm mô tả dạng đồng hồ đếm ngược mm:ss."),
+    ("CLICK_DESC_REGEX", "CLICK_DESC_REGEX:^Mở.*", "Bấm node có mô tả khớp biểu thức chính quy."),
+    ("CLICK_CLASS_DESC_REGEX", "CLICK_CLASS_DESC_REGEX:android.widget.Button|^Mở.*", "Lọc theo class và regex mô tả."),
+    ("TAP", "TAP:540,1200", "Bấm trực tiếp tại toạ độ x,y."),
+    ("SWIPE", "SWIPE:540,1500,540,500,350", "Vuốt từ A đến B trong thời gian mili giây."),
+    ("WAIT", "WAIT:Văn bản", "Chờ node có text hoặc mô tả xuất hiện."),
+    ("WAIT_IMG", "WAIT_IMG:tên_mẫu", "Chờ ảnh mẫu xuất hiện trên màn hình."),
+    ("CLICK_IMG", "CLICK_IMG:tên_mẫu", "Tìm và bấm vào ảnh mẫu."),
+    ("OPEN_APP", "OPEN_APP:com.example.app", "Mở package trong profile cá nhân."),
+    ("OPEN_APP profile", "OPEN_APP:com.example.app|16", "Mở package theo profile serial."),
+    ("SLEEP", "SLEEP:1.5", "Tạm chờ số giây, tối đa 3600 giây."),
+    ("UP", "UP", "Vuốt lên theo cấu hình mặc định."),
+    ("DOWN", "DOWN", "Vuốt xuống theo cấu hình mặc định."),
+    ("LEFT", "LEFT", "Vuốt sang trái."),
+    ("RIGHT", "RIGHT", "Vuốt sang phải."),
+    ("BACK", "BACK", "Thực hiện nút Quay lại."),
+    ("HOME", "HOME", "Trở về màn hình chính."),
+    ("RECENTS", "RECENTS", "Mở màn hình đa nhiệm."),
+    ("LABEL", "LABEL:TEN_NHAN", "Đánh dấu vị trí để GOTO hoặc IF nhảy tới."),
+    ("GOTO", "GOTO:TEN_NHAN", "Nhảy tới LABEL tương ứng."),
+    ("IF", "IF:Văn bản|TEN_NHAN", "Nếu thấy mục tiêu thì nhảy tới LABEL."),
+    ("IF_NOT", "IF_NOT:Văn bản|TEN_NHAN", "Nếu không thấy mục tiêu thì nhảy tới LABEL."),
+    ("LOOP", "LOOP:10", "Bắt đầu vòng lặp với số lần chỉ định."),
+    ("END_LOOP", "END_LOOP", "Kết thúc và quay lại đầu vòng lặp."),
+    ("BREAK", "BREAK", "Thoát khỏi vòng lặp hiện tại."),
+    ("CONTINUE", "CONTINUE", "Chuyển sang lượt lặp tiếp theo."),
+)
+
 
 class WebSocketBackend:
     def __init__(self, events):
@@ -146,6 +176,7 @@ class TronangControlApp:
         self.app_profile_var = tk.StringVar(value="Không tự mở ứng dụng")
         self.app_profile_targets = {}
         self.saved_workflow_rows = {}
+        self.command_guide_filter_var = tk.StringVar()
 
         self.host_var = tk.StringVar(value="0.0.0.0")
         self.port_var = tk.StringVar(value="8770")
@@ -209,13 +240,17 @@ class TronangControlApp:
         logs = ttk.Frame(self.notebook, padding=8)
         screens = ttk.Frame(self.notebook, padding=8)
         library = ttk.Frame(self.notebook, padding=8)
+        guide = ttk.Frame(self.notebook, padding=8)
+        self.nodes_tab = nodes
         self.notebook.add(control, text="Điều khiển")
         self.notebook.add(library, text="Thư viện workflow")
+        self.notebook.add(guide, text="Hướng dẫn lệnh")
         self.notebook.add(screens, text="Màn hình")
         self.notebook.add(nodes, text="Nodes")
         self.notebook.add(logs, text="Log / độ trễ")
         self._build_control_tab(control)
         self._build_library_tab(library)
+        self._build_command_guide_tab(guide)
         self._build_screens_tab(screens)
         self._build_nodes_tab(nodes)
         self._build_log_tab(logs)
@@ -341,6 +376,81 @@ class TronangControlApp:
         ttk.Button(row_actions, text="Nạp để sửa", command=self.load_saved_workflow).pack(side=tk.LEFT)
         ttk.Button(row_actions, text="Chạy trên điện thoại", command=self.run_saved_workflow).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_actions, text="Xoá khỏi điện thoại", command=self.remove_saved_workflow).pack(side=tk.LEFT)
+
+    def _build_command_guide_tab(self, parent):
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(toolbar, text="Tìm lệnh").pack(side=tk.LEFT)
+        search = ttk.Entry(toolbar, textvariable=self.command_guide_filter_var, width=36)
+        search.pack(side=tk.LEFT, padx=6)
+        search.bind("<KeyRelease>", lambda _event: self._refresh_command_guide())
+        ttk.Button(toolbar, text="Xoá lọc", command=self._clear_command_guide_filter).pack(side=tk.LEFT)
+        ttk.Label(
+            toolbar,
+            text="Nhấp đúp một dòng để chèn cú pháp vào workflow.",
+        ).pack(side=tk.RIGHT)
+
+        columns = ("command", "syntax", "description")
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.command_guide_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        for column, title, width in (
+            ("command", "Lệnh", 170),
+            ("syntax", "Cú pháp / ví dụ", 390),
+            ("description", "Công dụng", 560),
+        ):
+            self.command_guide_tree.heading(column, text=title)
+            self.command_guide_tree.column(column, width=width, minwidth=100)
+        y_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.command_guide_tree.yview)
+        self.command_guide_tree.configure(yscrollcommand=y_scroll.set)
+        self.command_guide_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.command_guide_tree.bind("<Double-1>", lambda _event: self._insert_guide_command())
+
+        actions = ttk.Frame(parent)
+        actions.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(actions, text="Chèn vào workflow", command=self._insert_guide_command).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Sao chép cú pháp", command=self._copy_guide_command).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Mở tab Điều khiển", command=lambda: self.notebook.select(0)).pack(side=tk.LEFT)
+        self._refresh_command_guide()
+
+    def _refresh_command_guide(self):
+        if not hasattr(self, "command_guide_tree"):
+            return
+        query = self.command_guide_filter_var.get().strip().casefold()
+        for item in self.command_guide_tree.get_children():
+            self.command_guide_tree.delete(item)
+        for command, syntax, description in COMMAND_GUIDE:
+            searchable = f"{command} {syntax} {description}".casefold()
+            if not query or query in searchable:
+                self.command_guide_tree.insert("", tk.END, values=(command, syntax, description))
+
+    def _clear_command_guide_filter(self):
+        self.command_guide_filter_var.set("")
+        self._refresh_command_guide()
+
+    def _selected_guide_syntax(self):
+        selected = self.command_guide_tree.selection()
+        if not selected:
+            messagebox.showwarning("Chọn lệnh", "Hãy chọn một lệnh trong danh sách hướng dẫn.")
+            return None
+        return self.command_guide_tree.item(selected[0], "values")[1]
+
+    def _insert_guide_command(self):
+        syntax = self._selected_guide_syntax()
+        if not syntax:
+            return
+        current = self.workflow_text.get("1.0", tk.END).strip()
+        self.workflow_text.delete("1.0", tk.END)
+        self.workflow_text.insert("1.0", f"{current};{syntax}" if current else syntax)
+
+    def _copy_guide_command(self):
+        syntax = self._selected_guide_syntax()
+        if not syntax:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(syntax)
+        self.root.update_idletasks()
 
     def _build_nodes_tab(self, parent):
         filters = ttk.Frame(parent)
@@ -1229,7 +1339,7 @@ class TronangControlApp:
             f"{obj.get('returned', 0)}/{obj.get('total', 0)} nodes gần nhất"
         )
         self.device_summary_var.set(f"{client_id}: {obj.get('package')}")
-        self.notebook.select(2)
+        self.notebook.select(self.nodes_tab)
         self._log(
             f"[{client_id} • {label}] NODES package={obj.get('package')} returned={obj.get('returned')}/"
             f"{obj.get('total')} offset={obj.get('offset')} has_more={obj.get('has_more')}"
