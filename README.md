@@ -377,6 +377,10 @@ Socket JSON hỗ trợ:
 
 Có thể vừa lưu vừa chạy bằng `{"cmd":"run","save_as":"Tên workflow","script":"...","package_name":"...","profile_serial":0}`. Lệnh workflow trực tiếp cũng hỗ trợ `OPEN_APP:com.example.app|0`; bỏ `|profile_serial` để dùng profile hiện tại.
 
+Trong `tools/ws_gui.py`, tab **Thư viện workflow** hỗ trợ lấy danh sách app/profile từ
+điện thoại, lưu hoặc ghi đè nhiều workflow, nạp để sửa, chạy và xoá từng mục. Các thao
+tác thư viện yêu cầu chọn đúng một điện thoại vì dữ liệu được lưu riêng trên từng máy.
+
 ## Build
 
 ```bash
