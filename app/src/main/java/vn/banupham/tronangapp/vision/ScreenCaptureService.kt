@@ -460,6 +460,25 @@ class ScreenCaptureService : Service() {
             return true
         }
 
+        fun probeImageTarget(
+            name: String,
+            callback: (Result<ImageTargetRuntime.ImageMatch?>) -> Unit
+        ): Boolean {
+            val service = instance ?: return false
+            val handler = service.captureHandler ?: return false
+            handler.post {
+                val image = service.latestImage
+                callback(
+                    if (image == null) {
+                        Result.failure(IllegalStateException("screen_frame_unavailable"))
+                    } else {
+                        ImageTargetRuntime.probeFrame(name, image, service.width, service.height)
+                    }
+                )
+            }
+            return true
+        }
+
         @Volatile
         private var instance: ScreenCaptureService? = null
 

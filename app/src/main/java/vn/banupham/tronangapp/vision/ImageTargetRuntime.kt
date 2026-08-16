@@ -259,6 +259,28 @@ object ImageTargetRuntime {
         onMatch?.invoke(match)
     }
 
+    fun probeFrame(
+        name: String,
+        image: Image,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Result<ImageMatch?> = runCatching {
+        val key = normalizeName(name)
+        val target = targets[key] ?: error("image_target_not_registered")
+        val match = findMatch(
+            image = image,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            target = target,
+            hint = lastSuccessfulMatches[key]
+        )
+        if (match != null) {
+            lastSuccessfulMatches[key] = match
+            lastMatch = match
+        }
+        match
+    }
+
     private fun findMatch(
         image: Image,
         screenWidth: Int,

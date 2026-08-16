@@ -538,6 +538,17 @@ class GenericAccessibilityService : AccessibilityService() {
         ImageTargetRuntime.clearWatch()
     }
 
+    fun probeImage(target: String, callback: (Result<Boolean>) -> Unit): String? {
+        if (AutomationMode.paused) return "automation_paused"
+        if (!ScreenCaptureService.running) return "screen_capture_not_running"
+        if (!ImageTargetRuntime.hasTarget(target)) return "image_target_not_registered"
+        return if (
+            ScreenCaptureService.probeImageTarget(target) { result ->
+                callback(result.map { match -> match != null })
+            }
+        ) null else "screen_capture_not_running"
+    }
+
     fun runWorkflow(script: String, requestId: String? = null): WorkflowStatus =
         if (AutomationMode.paused) {
             WorkflowStatus(state = "failed", error = "automation_paused", requestId = requestId)

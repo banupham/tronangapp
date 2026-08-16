@@ -381,6 +381,15 @@ Trong `tools/ws_gui.py`, tab **Thư viện workflow** hỗ trợ lấy danh sác
 điện thoại, lưu hoặc ghi đè nhiều workflow, nạp để sửa, chạy và xoá từng mục. Các thao
 tác thư viện yêu cầu chọn đúng một điện thoại vì dữ liệu được lưu riêng trên từng máy.
 
+Điều kiện ảnh kiểm tra một frame hiện tại và không chờ vô hạn:
+
+```text
+IF_NOT_IMG:nhan|BO_QUA_NHAN;CLICK_IMG:nhan;SLEEP_RANDOM:2,5;CLICK_IMG:ok;LABEL:BO_QUA_NHAN
+```
+
+`IF_IMG:tên_mẫu|NHÃN` nhảy khi thấy ảnh; `IF_NOT_IMG:tên_mẫu|NHÃN` nhảy khi không
+thấy ảnh. `SLEEP_RANDOM:min,max` nghỉ ngẫu nhiên trong khoảng giây, từ 0 đến 3600.
+
 ## Build
 
 ```bash

@@ -3,6 +3,7 @@ package vn.banupham.tronangapp.runtime
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.Locale
+import kotlin.random.Random
 import vn.banupham.tronangapp.accessibility.DynamicAccessibilityClick
 import vn.banupham.tronangapp.accessibility.GenericAccessibilityService
 import vn.banupham.tronangapp.vision.ImageTargetRuntime
@@ -24,6 +25,7 @@ sealed class WorkflowStep {
     ) : WorkflowStep()
     data class Wait(val target: String) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
+    data class RandomSleep(val minSeconds: Double, val maxSeconds: Double) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
     data class ClickImage(val target: String) : WorkflowStep()
     data class OpenApp(val packageName: String, val profileSerial: Long?) : WorkflowStep()
@@ -35,6 +37,16 @@ sealed class WorkflowStep {
         var destination: Int = -1
     ) : WorkflowStep()
     data class IfNotVisible(
+        val target: String,
+        val label: String,
+        var destination: Int = -1
+    ) : WorkflowStep()
+    data class IfImageVisible(
+        val target: String,
+        val label: String,
+        var destination: Int = -1
+    ) : WorkflowStep()
+    data class IfImageNotVisible(
         val target: String,
         val label: String,
         var destination: Int = -1
@@ -355,6 +367,11 @@ class WorkflowEngine(
                     return
                 }
 
+                is WorkflowStep.RandomSleep -> {
+                    startRandomSleepLocked(step)
+                    return
+                }
+
                 is WorkflowStep.WaitImage -> {
                     startImageWaitLocked(step.target, step)
                     return
@@ -384,6 +401,16 @@ class WorkflowEngine(
 
                 is WorkflowStep.IfNotVisible -> {
                     index = if (!service.isTargetReady(step.target)) step.destination else index + 1
+                }
+
+                is WorkflowStep.IfImageVisible -> {
+                    startImageConditionalLocked(step.target, step.destination, false, step)
+                    return
+                }
+
+                is WorkflowStep.IfImageNotVisible -> {
+                    startImageConditionalLocked(step.target, step.destination, true, step)
+                    return
                 }
 
                 is WorkflowStep.LoopStart -> {
@@ -513,6 +540,53 @@ class WorkflowEngine(
         }
     }
 
+    private fun startRandomSleepLocked(step: WorkflowStep.RandomSleep) {
+        val seconds = if (step.minSeconds == step.maxSeconds) {
+            step.minSeconds
+        } else {
+            Random.nextDouble(step.minSeconds, step.maxSeconds)
+        }
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("sleeping", step))
+        service.delayForWorkflow((seconds * 1_000.0).toLong()) {
+            onAsyncActionFinished(token, true, step, "sleep_cancelled")
+        }
+    }
+
+    private fun startImageConditionalLocked(
+        target: String,
+        destination: Int,
+        negated: Boolean,
+        step: WorkflowStep
+    ) {
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("checking", step))
+        val error = service.probeImage(target) { result ->
+            synchronized(this) {
+                if (token != executionId || !actionInFlight || steps.getOrNull(index) != step) {
+                    return@synchronized
+                }
+                actionInFlight = false
+                result.fold(
+                    onSuccess = { visible ->
+                        val shouldJump = if (negated) !visible else visible
+                        index = if (shouldJump) destination else index + 1
+                        advanceLocked()
+                    },
+                    onFailure = { failure ->
+                        failLocked(failure.message ?: "image_probe_failed", step)
+                    }
+                )
+            }
+        }
+        if (error != null) {
+            actionInFlight = false
+            failLocked(error, step)
+        }
+    }
+
     private fun startImageWaitLocked(target: String, step: WorkflowStep) {
         // Arm state before the matcher so an immediate frame match cannot race
         // ahead of the workflow state.
@@ -603,6 +677,7 @@ class WorkflowEngine(
         is WorkflowStep.Swipe -> "SWIPE"
         is WorkflowStep.Wait -> "WAIT"
         is WorkflowStep.Sleep -> "SLEEP"
+        is WorkflowStep.RandomSleep -> "SLEEP_RANDOM"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
         is WorkflowStep.ClickImage -> "CLICK_IMG"
         is WorkflowStep.OpenApp -> "OPEN_APP"
@@ -610,6 +685,8 @@ class WorkflowEngine(
         is WorkflowStep.Goto -> "GOTO"
         is WorkflowStep.IfVisible -> "IF"
         is WorkflowStep.IfNotVisible -> "IF_NOT"
+        is WorkflowStep.IfImageVisible -> "IF_IMG"
+        is WorkflowStep.IfImageNotVisible -> "IF_NOT_IMG"
         is WorkflowStep.LoopStart -> "LOOP"
         is WorkflowStep.LoopEnd -> "END_LOOP"
         is WorkflowStep.Break -> "BREAK"
@@ -632,6 +709,7 @@ class WorkflowEngine(
             "${step.startX},${step.startY},${step.endX},${step.endY},${step.durationMs}"
         is WorkflowStep.Wait -> step.target
         is WorkflowStep.Sleep -> step.seconds.toString()
+        is WorkflowStep.RandomSleep -> "${step.minSeconds},${step.maxSeconds}"
         is WorkflowStep.WaitImage -> step.target
         is WorkflowStep.ClickImage -> step.target
         is WorkflowStep.OpenApp ->
@@ -641,6 +719,8 @@ class WorkflowEngine(
         is WorkflowStep.Goto -> step.label
         is WorkflowStep.IfVisible -> "${step.target}|${step.label}"
         is WorkflowStep.IfNotVisible -> "${step.target}|${step.label}"
+        is WorkflowStep.IfImageVisible -> "${step.target}|${step.label}"
+        is WorkflowStep.IfImageNotVisible -> "${step.target}|${step.label}"
         is WorkflowStep.LoopStart -> step.count.toString()
         is WorkflowStep.LoopEnd,
         is WorkflowStep.Break,
@@ -795,6 +875,21 @@ class WorkflowEngine(
                         WorkflowStep.Sleep(seconds)
                     }
 
+                    "SLEEP_RANDOM", "RANDOM_SLEEP" -> {
+                        val parts = argument.replace('|', ',').split(',').map(String::trim)
+                        require(parts.size == 2) { "SLEEP_RANDOM_requires_min_max_seconds" }
+                        val minSeconds = parts[0].toDoubleOrNull()
+                            ?: throw IllegalArgumentException("SLEEP_RANDOM_invalid_min")
+                        val maxSeconds = parts[1].toDoubleOrNull()
+                            ?: throw IllegalArgumentException("SLEEP_RANDOM_invalid_max")
+                        require(
+                            minSeconds.isFinite() && maxSeconds.isFinite() &&
+                                minSeconds >= 0.0 && maxSeconds >= minSeconds &&
+                                maxSeconds <= MAX_SLEEP_SECONDS
+                        ) { "SLEEP_RANDOM_range_out_of_bounds" }
+                        WorkflowStep.RandomSleep(minSeconds, maxSeconds)
+                    }
+
                     "UP" -> {
                         require(argument.isEmpty()) { "UP_does_not_take_target" }
                         WorkflowStep.Up
@@ -818,6 +913,10 @@ class WorkflowEngine(
                     "IF", "IF_VISIBLE" -> parseConditional(argument, negated = false)
 
                     "IF_NOT", "IF_NOT_VISIBLE" -> parseConditional(argument, negated = true)
+
+                    "IF_IMG", "IF_IMAGE" -> parseImageConditional(argument, negated = false)
+
+                    "IF_NOT_IMG", "IF_NOT_IMAGE" -> parseImageConditional(argument, negated = true)
 
                     "LOOP", "REPEAT" -> {
                         val count = argument.toIntOrNull()
@@ -889,6 +988,25 @@ class WorkflowEngine(
             }
         }
 
+        private fun parseImageConditional(argument: String, negated: Boolean): WorkflowStep {
+            val separator = argument.lastIndexOf('|')
+            require(separator > 0 && separator < argument.length - 1) {
+                if (negated) "IF_NOT_IMG_requires_target_and_label"
+                else "IF_IMG_requires_target_and_label"
+            }
+            val target = argument.substring(0, separator).trim()
+            val label = normalizeLabel(argument.substring(separator + 1))
+            require(target.isNotEmpty() && label.isNotEmpty()) {
+                if (negated) "IF_NOT_IMG_requires_target_and_label"
+                else "IF_IMG_requires_target_and_label"
+            }
+            return if (negated) {
+                WorkflowStep.IfImageNotVisible(target, label)
+            } else {
+                WorkflowStep.IfImageVisible(target, label)
+            }
+        }
+
         private fun resolveControlFlow(steps: List<WorkflowStep>): List<WorkflowStep> {
             val labels = HashMap<String, Int>()
             val loopStack = ArrayList<Int>()
@@ -932,6 +1050,10 @@ class WorkflowEngine(
                     is WorkflowStep.IfVisible -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.IfNotVisible -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.IfImageVisible -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.IfImageNotVisible -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.Break ->
                         step.endIndex = (steps[step.startIndex] as WorkflowStep.LoopStart).endIndex
