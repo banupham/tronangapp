@@ -193,6 +193,11 @@ class TronangControlApp:
         self.screen_images = {}
         self.screen_source_images = {}
         self.screen_geometry = {}
+        self.zoom_windows = {}
+        self.zoom_canvases = {}
+        self.zoom_images = {}
+        self.zoom_geometry = {}
+        self.zoom_sample_drag = None
         self.screen_render_job = None
         self.closing = False
         self.sample_mode = False
@@ -625,6 +630,9 @@ class TronangControlApp:
             side=tk.LEFT
         )
         ttk.Button(toolbar, text="Đổi kích thước", command=self.apply_display_size).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(toolbar, text="Phóng to lấy mẫu", command=self.open_sample_zoom).pack(
             side=tk.LEFT, padx=4
         )
         ttk.Label(toolbar, textvariable=self.stream_status_var).pack(side=tk.RIGHT)
@@ -1113,6 +1121,7 @@ class TronangControlApp:
         self.screen_images.pop(client_id, None)
         self.screen_source_images.pop(client_id, None)
         self.screen_geometry.pop(client_id, None)
+        self._close_sample_zoom(client_id)
         with self.frame_lock:
             self.pending_frames.pop(client_id, None)
         self._schedule_screen_render()
@@ -1430,6 +1439,7 @@ class TronangControlApp:
         self.screen_source_images[client_id] = image
         self.screen_geometry[client_id] = (source_width, source_height, image.width, image.height)
         self._render_screen_image(client_id)
+        self._render_zoom_image(client_id)
         self._schedule_screen_render()
 
     def _display_percent(self):
@@ -1499,6 +1509,89 @@ class TronangControlApp:
         source_width, source_height, _, _ = self.screen_geometry[client_id]
         self.screen_geometry[client_id] = (source_width, source_height, width, height)
 
+    def open_sample_zoom(self):
+        targets = [client_id for client_id in self._selected_clients() if client_id in self.screen_source_images]
+        if len(targets) != 1:
+            messagebox.showinfo(
+                "Phóng to lấy mẫu",
+                "Hãy chọn đúng 1 điện thoại đang hiển thị màn hình.",
+            )
+            return
+        client_id = targets[0]
+        existing = self.zoom_windows.get(client_id)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title(f"Phóng to lấy mẫu • {client_id}")
+        width = min(700, max(480, self.root.winfo_screenwidth() - 120))
+        height = min(900, max(620, self.root.winfo_screenheight() - 100))
+        window.geometry(f"{width}x{height}")
+        ttk.Label(
+            window,
+            text="Bật ‘Tạo ảnh mẫu’ ở cửa sổ chính rồi kéo khoanh trực tiếp trên ảnh này.",
+            padding=6,
+        ).pack(fill=tk.X)
+        canvas = tk.Canvas(window, background="#202020", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+        canvas.configure(cursor="crosshair" if self.sample_mode else "hand2")
+        canvas.bind("<Configure>", lambda _event, device=client_id: self._render_zoom_image(device))
+        canvas.bind("<Button-1>", lambda event, device=client_id: self._zoom_pointer_down(device, event))
+        canvas.bind("<B1-Motion>", lambda event, device=client_id: self._zoom_pointer_drag(device, event))
+        canvas.bind(
+            "<ButtonRelease-1>",
+            lambda event, device=client_id: self._zoom_pointer_up(device, event),
+        )
+        window.protocol("WM_DELETE_WINDOW", lambda device=client_id: self._close_sample_zoom(device))
+        self.zoom_windows[client_id] = window
+        self.zoom_canvases[client_id] = canvas
+        window.update_idletasks()
+        self._render_zoom_image(client_id)
+
+    def _close_sample_zoom(self, client_id):
+        window = self.zoom_windows.pop(client_id, None)
+        self.zoom_canvases.pop(client_id, None)
+        self.zoom_images.pop(client_id, None)
+        self.zoom_geometry.pop(client_id, None)
+        if self.zoom_sample_drag and self.zoom_sample_drag[0] == client_id:
+            self.zoom_sample_drag = None
+        if window is not None and window.winfo_exists():
+            window.destroy()
+
+    def _render_zoom_image(self, client_id):
+        image = self.screen_source_images.get(client_id)
+        canvas = self.zoom_canvases.get(client_id)
+        source_geometry = self.screen_geometry.get(client_id)
+        if image is None or canvas is None or source_geometry is None or not canvas.winfo_exists():
+            return
+        available_width = max(100, canvas.winfo_width() - 12)
+        available_height = max(100, canvas.winfo_height() - 12)
+        width, height = self._fit_screen_size(
+            image.width,
+            image.height,
+            available_width,
+            available_height,
+            1.0,
+        )
+        rendered = image if (width, height) == image.size else image.resize(
+            (width, height), Image.Resampling.BILINEAR
+        )
+        photo = ImageTk.PhotoImage(rendered)
+        self.zoom_images[client_id] = photo
+        canvas.delete("frame_image")
+        canvas.create_image(
+            canvas.winfo_width() // 2,
+            canvas.winfo_height() // 2,
+            image=photo,
+            anchor=tk.CENTER,
+            tags="frame_image",
+        )
+        canvas.tag_lower("frame_image")
+        source_width, source_height, _, _ = source_geometry
+        self.zoom_geometry[client_id] = (source_width, source_height, width, height)
+
     @staticmethod
     def _fit_screen_size(image_width, image_height, available_width, available_height, percent):
         scale = min(
@@ -1521,6 +1614,10 @@ class TronangControlApp:
     def _screen_point_to_source(self, client_id, x, y):
         geometry = self.screen_geometry.get(client_id)
         widget = self.screen_labels.get(client_id)
+        return self._point_to_source(widget, geometry, x, y)
+
+    @staticmethod
+    def _point_to_source(widget, geometry, x, y):
         if geometry is None or widget is None:
             return None
         source_width, source_height, rendered_width, rendered_height = geometry
@@ -1533,6 +1630,54 @@ class TronangControlApp:
         target_x = min(source_width - 1, round(image_x * source_width / rendered_width))
         target_y = min(source_height - 1, round(image_y * source_height / rendered_height))
         return target_x, target_y, image_x, image_y
+
+    def _zoom_point_to_source(self, client_id, x, y):
+        return self._point_to_source(
+            self.zoom_canvases.get(client_id),
+            self.zoom_geometry.get(client_id),
+            x,
+            y,
+        )
+
+    def _zoom_pointer_down(self, client_id, event):
+        mapped = self._zoom_point_to_source(client_id, event.x, event.y)
+        if mapped is None:
+            return
+        if not self.sample_mode:
+            target_x, target_y, image_x, image_y = mapped
+            self._log(f"[{client_id}] ZOOM CLICK ({image_x},{image_y}) -> TAP:{target_x},{target_y}")
+            self.send_workflow(f"TAP:{target_x},{target_y}", [client_id])
+            return
+        self.zoom_sample_drag = (client_id, event.x, event.y)
+
+    def _zoom_pointer_drag(self, client_id, event):
+        if not self.sample_mode or not self.zoom_sample_drag or self.zoom_sample_drag[0] != client_id:
+            return
+        canvas = self.zoom_canvases.get(client_id)
+        if canvas is None:
+            return
+        _, start_x, start_y = self.zoom_sample_drag
+        canvas.delete("sample_selection")
+        canvas.create_rectangle(
+            start_x,
+            start_y,
+            event.x,
+            event.y,
+            outline="#ff4040",
+            width=2,
+            tags="sample_selection",
+        )
+
+    def _zoom_pointer_up(self, client_id, event):
+        if not self.sample_mode or not self.zoom_sample_drag or self.zoom_sample_drag[0] != client_id:
+            return
+        _, start_x, start_y = self.zoom_sample_drag
+        self.zoom_sample_drag = None
+        first = self._zoom_point_to_source(client_id, start_x, start_y)
+        second = self._zoom_point_to_source(client_id, event.x, event.y)
+        if first is None or second is None:
+            return
+        self._submit_image_sample(client_id, first, second)
 
     def toggle_sample_mode(self):
         if not self.sample_mode:
@@ -1556,6 +1701,9 @@ class TronangControlApp:
             "Kéo khoanh vùng ảnh mẫu" if self.sample_mode else "Đã hủy tạo ảnh mẫu"
         )
         for widget in self.screen_labels.values():
+            widget.delete("sample_selection")
+            widget.configure(cursor="crosshair" if self.sample_mode else "hand2")
+        for widget in self.zoom_canvases.values():
             widget.delete("sample_selection")
             widget.configure(cursor="crosshair" if self.sample_mode else "hand2")
 
@@ -1592,6 +1740,9 @@ class TronangControlApp:
         second = self._screen_point_to_source(client_id, event.x, event.y)
         if first is None or second is None:
             return
+        self._submit_image_sample(client_id, first, second)
+
+    def _submit_image_sample(self, client_id, first, second):
         left, right = sorted((first[0], second[0]))
         top, bottom = sorted((first[1], second[1]))
         right += 1
@@ -1622,6 +1773,9 @@ class TronangControlApp:
         self.sample_button_var.set("Tạo ảnh mẫu")
         self.stream_status_var.set(f"{client_id}: đang tạo mẫu {payload['name']}…")
         for widget in self.screen_labels.values():
+            widget.delete("sample_selection")
+            widget.configure(cursor="hand2")
+        for widget in self.zoom_canvases.values():
             widget.delete("sample_selection")
             widget.configure(cursor="hand2")
 
