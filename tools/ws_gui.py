@@ -263,6 +263,8 @@ class TronangControlApp:
         self.device_checks = ttk.Frame(devices)
         self.device_checks.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
 
+        self._build_quick_controls(self.root)
+
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
@@ -274,6 +276,7 @@ class TronangControlApp:
         guide = ttk.Frame(self.notebook, padding=8)
         planner = ttk.Frame(self.notebook, padding=8)
         self.nodes_tab = nodes
+        self.logs_tab = logs
         self.notebook.add(control, text="Điều khiển")
         self.notebook.add(library, text="Thư viện workflow")
         self.notebook.add(guide, text="Hướng dẫn lệnh")
@@ -288,12 +291,11 @@ class TronangControlApp:
         self._build_screens_tab(screens)
         self._build_nodes_tab(nodes)
         self._build_log_tab(logs)
+        self.notebook.bind("<<NotebookTabChanged>>", self._toggle_quick_controls)
 
-    def _build_control_tab(self, parent):
-        ttk.Label(parent, textvariable=self.device_summary_var).pack(anchor=tk.W, pady=(0, 8))
-
-        quick = ttk.LabelFrame(parent, text="Điều khiển nhanh", padding=8)
-        quick.pack(fill=tk.X)
+    def _build_quick_controls(self, parent):
+        self.quick_controls = ttk.LabelFrame(parent, text="Điều khiển nhanh", padding=6)
+        self.quick_controls.pack(fill=tk.X, padx=8, pady=(0, 6))
         for label, command in (
             ("↑ UP", "UP"),
             ("↓ DOWN", "DOWN"),
@@ -304,10 +306,24 @@ class TronangControlApp:
             ("RECENTS", "RECENTS"),
         ):
             ttk.Button(
-                quick,
+                self.quick_controls,
                 text=label,
                 command=lambda value=command: self.send_workflow(value),
             ).pack(side=tk.LEFT, padx=3)
+
+    def _toggle_quick_controls(self, _event=None):
+        if self.notebook.select() == str(self.logs_tab):
+            self.quick_controls.pack_forget()
+        elif not self.quick_controls.winfo_manager():
+            self.quick_controls.pack(
+                fill=tk.X,
+                padx=8,
+                pady=(0, 6),
+                before=self.notebook,
+            )
+
+    def _build_control_tab(self, parent):
+        ttk.Label(parent, textvariable=self.device_summary_var).pack(anchor=tk.W, pady=(0, 8))
 
         custom_swipe = ttk.LabelFrame(parent, text="Vuốt từ điểm A đến B", padding=8)
         custom_swipe.pack(fill=tk.X, pady=(8, 0))
