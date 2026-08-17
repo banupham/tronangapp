@@ -24,7 +24,7 @@ sealed class WorkflowStep {
         val endY: Int,
         val durationMs: Long
     ) : WorkflowStep()
-    data class Wait(val target: String) : WorkflowStep()
+    data class Wait(val target: String, val timeoutSeconds: Double? = null) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class RandomSleep(val minSeconds: Double, val maxSeconds: Double) : WorkflowStep()
     data class WaitCountdown(
@@ -47,7 +47,13 @@ sealed class WorkflowStep {
         val timeoutLabel: String?,
         var timeoutDestination: Int = -1
     ) : WorkflowStep()
-    data class ClickImage(val target: String) : WorkflowStep()
+    data class ClickImage(val target: String, val timeoutSeconds: Double? = null) : WorkflowStep()
+    data class Checkpoint(val clear: Boolean) : WorkflowStep()
+    data class RequireDevice(
+        val requirements: Set<String>,
+        val label: String,
+        var destination: Int = -1
+    ) : WorkflowStep()
     data class SetVariable(val name: String, val value: String) : WorkflowStep()
     data class IncrementVariable(val name: String, val amount: Double) : WorkflowStep()
     data class IfVariable(
@@ -140,13 +146,20 @@ class WorkflowEngine(
     private val loopCounters = HashMap<Int, Int>()
     private val variables = HashMap<String, String>()
     private var errorDestination = -1
+    private var currentScript = ""
 
     @Synchronized
     fun start(script: String, requestId: String? = null): WorkflowStatus {
+        return startAt(script, requestId, 0)
+    }
+
+    @Synchronized
+    fun startAt(script: String, requestId: String? = null, startIndex: Int = 0): WorkflowStatus {
         cancelCurrentForReplacementLocked()
         executionId++
         service.cancelImageWatch()
         currentRequestId = requestId
+        currentScript = script
 
         val parsed = try {
             parse(script)
@@ -181,7 +194,7 @@ class WorkflowEngine(
         }
 
         steps = parsed
-        index = 0
+        index = startIndex.coerceIn(0, parsed.size)
         actionInFlight = false
         executedStepCount = 0
         loopCounters.clear()
@@ -190,7 +203,7 @@ class WorkflowEngine(
         setStatus(
             WorkflowStatus(
                 state = "running",
-                stepIndex = 0,
+                stepIndex = index,
                 stepCount = steps.size,
                 requestId = currentRequestId
             )
@@ -334,6 +347,7 @@ class WorkflowEngine(
                 is WorkflowStep.Wait -> {
                     if (!service.isTargetReady(step.target)) {
                         setStatus(statusFor("waiting", step))
+                        scheduleStepTimeoutLocked(step, step.timeoutSeconds, "text_wait_timeout")
                         return
                     }
                     index++
@@ -468,8 +482,19 @@ class WorkflowEngine(
                 }
 
                 is WorkflowStep.ClickImage -> {
-                    startImageWaitLocked(step.target, step)
+                    startImageWaitLocked(step.target, step, step.timeoutSeconds)
                     return
+                }
+
+                is WorkflowStep.Checkpoint -> {
+                    if (step.clear) service.clearWorkflowCheckpoint()
+                    else service.saveWorkflowCheckpoint(currentScript, index + 1, currentRequestId)
+                    index++
+                }
+
+                is WorkflowStep.RequireDevice -> {
+                    index = if (service.deviceRequirementsMet(step.requirements)) index + 1
+                    else step.destination
                 }
 
                 is WorkflowStep.OpenApp -> {
@@ -769,6 +794,23 @@ class WorkflowEngine(
         }
     }
 
+    private fun scheduleStepTimeoutLocked(
+        step: WorkflowStep,
+        timeoutSeconds: Double?,
+        error: String
+    ) {
+        if (timeoutSeconds == null) return
+        val token = executionId
+        service.delayForWorkflow((timeoutSeconds * 1_000.0).toLong()) {
+            synchronized(this) {
+                if (token != executionId || steps.getOrNull(index) != step || status.state != "waiting") {
+                    return@synchronized
+                }
+                failLocked(error, step)
+            }
+        }
+    }
+
     private fun startWaitAnyImageLocked(step: WorkflowStep.WaitAnyImage) {
         actionInFlight = true
         val token = executionId
@@ -928,14 +970,16 @@ class WorkflowEngine(
         is WorkflowStep.TapPercent -> "TAP_PERCENT"
         is WorkflowStep.Swipe -> "SWIPE"
         is WorkflowStep.SwipePercent -> "SWIPE_PERCENT"
-        is WorkflowStep.Wait -> "WAIT"
+        is WorkflowStep.Wait -> if (step.timeoutSeconds == null) "WAIT" else "WAIT_TIMEOUT"
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.RandomSleep -> "SLEEP_RANDOM"
         is WorkflowStep.WaitCountdown -> if (step.random) "WAIT_TIME_RANDOM" else "WAIT_TIME"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
         is WorkflowStep.WaitImageTimeout -> "WAIT_IMG_TIMEOUT"
         is WorkflowStep.WaitAnyImage -> "WAIT_ANY_IMG"
-        is WorkflowStep.ClickImage -> "CLICK_IMG"
+        is WorkflowStep.ClickImage -> if (step.timeoutSeconds == null) "CLICK_IMG" else "CLICK_IMG_TIMEOUT"
+        is WorkflowStep.Checkpoint -> "CHECKPOINT"
+        is WorkflowStep.RequireDevice -> "REQUIRE_DEVICE"
         is WorkflowStep.SetVariable -> "SET"
         is WorkflowStep.IncrementVariable -> "INC"
         is WorkflowStep.IfVariable -> "IF_VAR"
@@ -971,7 +1015,7 @@ class WorkflowEngine(
             "${step.startX},${step.startY},${step.endX},${step.endY},${step.durationMs}"
         is WorkflowStep.SwipePercent ->
             "${step.startXPercent},${step.startYPercent},${step.endXPercent},${step.endYPercent},${step.durationMs}"
-        is WorkflowStep.Wait -> step.target
+        is WorkflowStep.Wait -> if (step.timeoutSeconds == null) step.target else "${step.target}|${step.timeoutSeconds}"
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.RandomSleep -> "${step.minSeconds},${step.maxSeconds}"
         is WorkflowStep.WaitCountdown ->
@@ -979,7 +1023,9 @@ class WorkflowEngine(
         is WorkflowStep.WaitImage -> step.target
         is WorkflowStep.WaitImageTimeout -> "${step.target}|${step.timeoutSeconds}"
         is WorkflowStep.WaitAnyImage -> "${step.targets.joinToString(",")}|${step.timeoutSeconds}"
-        is WorkflowStep.ClickImage -> step.target
+        is WorkflowStep.ClickImage -> if (step.timeoutSeconds == null) step.target else "${step.target}|${step.timeoutSeconds}"
+        is WorkflowStep.Checkpoint -> if (step.clear) "CLEAR" else "SAVE"
+        is WorkflowStep.RequireDevice -> "${step.requirements.joinToString(",")}|${step.label}"
         is WorkflowStep.SetVariable -> "${step.name}=${step.value}"
         is WorkflowStep.IncrementVariable -> "${step.name},${step.amount}"
         is WorkflowStep.IfVariable -> "${step.name}${step.operator}${step.expected}|${step.label}"
@@ -1124,6 +1170,11 @@ class WorkflowEngine(
                         WorkflowStep.Wait(argument)
                     }
 
+                    "WAIT_TIMEOUT" -> {
+                        val (target, seconds) = parseTargetTimeout(argument, "WAIT_TIMEOUT")
+                        WorkflowStep.Wait(target, seconds)
+                    }
+
                     "SWIPE_PERCENT", "SWIPE_PCT" -> {
                         val parts = argument.replace(' ', ',').split(',').map(String::trim)
                             .filter(String::isNotEmpty)
@@ -1170,6 +1221,19 @@ class WorkflowEngine(
                         require(argument.isNotEmpty()) { "CLICK_IMG_requires_target" }
                         WorkflowStep.ClickImage(argument)
                     }
+
+                    "CLICK_IMG_TIMEOUT" -> {
+                        val (target, seconds) = parseTargetTimeout(argument, "CLICK_IMG_TIMEOUT")
+                        WorkflowStep.ClickImage(target, seconds)
+                    }
+
+                    "CHECKPOINT" -> when (argument.uppercase(Locale.ROOT)) {
+                        "", "SAVE", "ON" -> WorkflowStep.Checkpoint(clear = false)
+                        "CLEAR", "OFF" -> WorkflowStep.Checkpoint(clear = true)
+                        else -> throw IllegalArgumentException("CHECKPOINT_requires_SAVE_or_CLEAR")
+                    }
+
+                    "REQUIRE_DEVICE" -> parseDeviceRequirement(argument)
 
                     "SET" -> {
                         val separator = argument.indexOf('=')
@@ -1369,6 +1433,35 @@ class WorkflowEngine(
             return WorkflowStep.WaitAnyImage(targets, seconds, label)
         }
 
+        private fun parseTargetTimeout(argument: String, command: String): Pair<String, Double> {
+            val separator = argument.lastIndexOf('|')
+            require(separator > 0) { "${command}_requires_target_seconds" }
+            val target = argument.substring(0, separator).trim()
+            val seconds = argument.substring(separator + 1).trim().toDoubleOrNull()
+                ?: throw IllegalArgumentException("${command}_invalid_seconds")
+            require(target.isNotEmpty() && seconds > 0.0 && seconds <= MAX_SLEEP_SECONDS) {
+                "${command}_out_of_range"
+            }
+            return target to seconds
+        }
+
+        private fun parseDeviceRequirement(argument: String): WorkflowStep.RequireDevice {
+            val separator = argument.lastIndexOf('|')
+            require(separator > 0) { "REQUIRE_DEVICE_requires_checks_and_label" }
+            val requirements = argument.substring(0, separator).split(',')
+                .map { it.trim().uppercase(Locale.ROOT) }.filter(String::isNotEmpty).toSet()
+            val supported = setOf("UNLOCKED", "CAPTURE", "NETWORK", "PORTRAIT", "LANDSCAPE")
+            require(requirements.isNotEmpty() && requirements.all { it in supported }) {
+                "REQUIRE_DEVICE_unsupported_check"
+            }
+            require(!("PORTRAIT" in requirements && "LANDSCAPE" in requirements)) {
+                "REQUIRE_DEVICE_conflicting_orientation"
+            }
+            val label = normalizeLabel(argument.substring(separator + 1))
+            require(label.isNotEmpty()) { "REQUIRE_DEVICE_requires_label" }
+            return WorkflowStep.RequireDevice(requirements, label)
+        }
+
         private fun parseVariableConditional(argument: String): WorkflowStep.IfVariable {
             val separator = argument.lastIndexOf('|')
             require(separator > 0) { "IF_VAR_requires_expression_and_label" }
@@ -1469,6 +1562,8 @@ class WorkflowEngine(
                     is WorkflowStep.IfCountdownVisible -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.IfVariable -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.RequireDevice -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.OnError -> step.destination = if (step.label == null) -1 else labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")

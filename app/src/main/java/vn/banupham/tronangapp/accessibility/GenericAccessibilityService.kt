@@ -3,6 +3,11 @@ package vn.banupham.tronangapp.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.app.KeyguardManager
+import android.content.Context
+import android.content.res.Configuration
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Handler
@@ -96,6 +101,7 @@ class GenericAccessibilityService : AccessibilityService() {
                     )
                 }
                 if (status.state in TERMINAL_WORKFLOW_STATES) {
+                    clearWorkflowCheckpoint()
                     mainHandler.post { handlePlanWorkflowTerminal(status) }
                 }
             },
@@ -118,7 +124,7 @@ class GenericAccessibilityService : AccessibilityService() {
         remoteSocket.connectSaved()
         refreshSnapshot("service_connected")
         mainHandler.postDelayed({ launchAutoCaptureRequest() }, AUTO_CAPTURE_LAUNCH_DELAY_MS)
-        consumePendingAutomationPlans()
+        if (!restoreWorkflowCheckpoint()) consumePendingAutomationPlans()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -554,6 +560,47 @@ class GenericAccessibilityService : AccessibilityService() {
 
     fun displaySizeForWorkflow(): Pair<Int, Int> =
         resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+
+    fun deviceRequirementsMet(requirements: Set<String>): Boolean = requirements.all { requirement ->
+        when (requirement) {
+            "UNLOCKED" -> !(getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager)
+                .isDeviceLocked
+            "CAPTURE" -> ScreenCaptureService.running
+            "NETWORK" -> {
+                val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val network = manager.activeNetwork
+                val capabilities = network?.let(manager::getNetworkCapabilities)
+                capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            }
+            "PORTRAIT" -> resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            "LANDSCAPE" -> resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            else -> false
+        }
+    }
+
+    fun saveWorkflowCheckpoint(script: String, nextIndex: Int, requestId: String?) {
+        getSharedPreferences(CHECKPOINT_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(CHECKPOINT_SCRIPT, script)
+            .putInt(CHECKPOINT_INDEX, nextIndex)
+            .putString(CHECKPOINT_REQUEST, requestId)
+            .apply()
+    }
+
+    fun clearWorkflowCheckpoint() {
+        getSharedPreferences(CHECKPOINT_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    private fun restoreWorkflowCheckpoint(): Boolean {
+        val prefs = getSharedPreferences(CHECKPOINT_PREFS, Context.MODE_PRIVATE)
+        val script = prefs.getString(CHECKPOINT_SCRIPT, null)?.takeIf(String::isNotBlank)
+            ?: return false
+        val index = prefs.getInt(CHECKPOINT_INDEX, -1)
+        if (index < 0 || AutomationMode.paused) return false
+        mainHandler.post {
+            workflowEngine.startAt(script, prefs.getString(CHECKPOINT_REQUEST, null), index)
+        }
+        return true
+    }
 
     fun probeImage(target: String, callback: (Result<Boolean>) -> Unit): String? {
         if (AutomationMode.paused) return "automation_paused"
@@ -1381,5 +1428,9 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val AUTO_CAPTURE_LAUNCH_DELAY_MS = 1_000L
         private const val AUTO_CAPTURE_CONSENT_WINDOW_MS = 10_000L
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+        private const val CHECKPOINT_PREFS = "workflow_checkpoint"
+        private const val CHECKPOINT_SCRIPT = "script"
+        private const val CHECKPOINT_INDEX = "next_index"
+        private const val CHECKPOINT_REQUEST = "request_id"
     }
 }
