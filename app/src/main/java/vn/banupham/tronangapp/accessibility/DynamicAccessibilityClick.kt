@@ -91,6 +91,36 @@ object DynamicAccessibilityClick {
         return StartResult.NOT_FOUND
     }
 
+    /** Uses the exact selector and description matching rules of [start], without clicking. */
+    fun exists(
+        service: GenericAccessibilityService,
+        className: String?,
+        descriptionRegex: Regex
+    ): Boolean {
+        val selector = parseSelector(className) ?: return false
+        val root = service.rootInActiveWindow ?: return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var inspected = 0
+        while (queue.isNotEmpty() && inspected < MAX_NODES) {
+            val node = queue.removeFirst()
+            inspected++
+            if (
+                node.isVisibleToUser &&
+                node.isEnabled &&
+                classMatches(node, selector.className) &&
+                descriptionMatches(node, descriptionRegex) &&
+                roiMatches(node, selector.roi)
+            ) {
+                return true
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let(queue::addLast)
+            }
+        }
+        return false
+    }
+
     private fun parseSelector(raw: String?): Selector? {
         val value = raw?.trim().orEmpty()
         if (value.isEmpty()) return Selector(className = null, roi = null)

@@ -22,6 +22,8 @@ MAX_LOG_LINES = 5_000
 COMMAND_GUIDE = (
     ("CLICK", "CLICK:Văn bản", "Bấm node theo text hoặc mô tả."),
     ("CLICK_TIME", "CLICK_TIME", "Bấm mô tả dạng đồng hồ đếm ngược mm:ss."),
+    ("IF_TIME", "IF_TIME:TEN_NHAN", "Nếu có mô tả đồng hồ mm:ss thì nhảy tới LABEL."),
+    ("IF_NOT_TIME", "IF_NOT_TIME:TEN_NHAN", "Nếu không còn mô tả đồng hồ mm:ss thì nhảy tới LABEL."),
     ("CLICK_DESC_REGEX", "CLICK_DESC_REGEX:^Mở.*", "Bấm node có mô tả khớp biểu thức chính quy."),
     ("CLICK_CLASS_DESC_REGEX", "CLICK_CLASS_DESC_REGEX:android.widget.Button|^Mở.*", "Lọc theo class và regex mô tả."),
     ("TAP", "TAP:540,1200", "Bấm trực tiếp tại toạ độ x,y."),

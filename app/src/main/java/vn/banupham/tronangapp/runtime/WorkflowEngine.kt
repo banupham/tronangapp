@@ -51,6 +51,11 @@ sealed class WorkflowStep {
         val label: String,
         var destination: Int = -1
     ) : WorkflowStep()
+    data class IfCountdownVisible(
+        val label: String,
+        val negated: Boolean,
+        var destination: Int = -1
+    ) : WorkflowStep()
     data class LoopStart(val count: Int, var endIndex: Int = -1) : WorkflowStep()
     data class LoopEnd(var startIndex: Int = -1) : WorkflowStep()
     data class Break(var startIndex: Int = -1, var endIndex: Int = -1) : WorkflowStep()
@@ -413,6 +418,15 @@ class WorkflowEngine(
                     return
                 }
 
+                is WorkflowStep.IfCountdownVisible -> {
+                    val visible = DynamicAccessibilityClick.exists(
+                        service = service,
+                        className = null,
+                        descriptionRegex = Regex(COUNTDOWN_DESCRIPTION_REGEX)
+                    )
+                    index = if (visible.xor(step.negated)) step.destination else index + 1
+                }
+
                 is WorkflowStep.LoopStart -> {
                     loopCounters.putIfAbsent(index, step.count)
                     index++
@@ -687,6 +701,7 @@ class WorkflowEngine(
         is WorkflowStep.IfNotVisible -> "IF_NOT"
         is WorkflowStep.IfImageVisible -> "IF_IMG"
         is WorkflowStep.IfImageNotVisible -> "IF_NOT_IMG"
+        is WorkflowStep.IfCountdownVisible -> if (step.negated) "IF_NOT_TIME" else "IF_TIME"
         is WorkflowStep.LoopStart -> "LOOP"
         is WorkflowStep.LoopEnd -> "END_LOOP"
         is WorkflowStep.Break -> "BREAK"
@@ -721,6 +736,7 @@ class WorkflowEngine(
         is WorkflowStep.IfNotVisible -> "${step.target}|${step.label}"
         is WorkflowStep.IfImageVisible -> "${step.target}|${step.label}"
         is WorkflowStep.IfImageNotVisible -> "${step.target}|${step.label}"
+        is WorkflowStep.IfCountdownVisible -> step.label
         is WorkflowStep.LoopStart -> step.count.toString()
         is WorkflowStep.LoopEnd,
         is WorkflowStep.Break,
@@ -918,6 +934,10 @@ class WorkflowEngine(
 
                     "IF_NOT_IMG", "IF_NOT_IMAGE" -> parseImageConditional(argument, negated = true)
 
+                    "IF_TIME" -> parseCountdownConditional(argument, negated = false)
+
+                    "IF_NOT_TIME" -> parseCountdownConditional(argument, negated = true)
+
                     "LOOP", "REPEAT" -> {
                         val count = argument.toIntOrNull()
                             ?: throw IllegalArgumentException("LOOP_requires_count")
@@ -1007,6 +1027,14 @@ class WorkflowEngine(
             }
         }
 
+        private fun parseCountdownConditional(argument: String, negated: Boolean): WorkflowStep {
+            val label = normalizeLabel(argument)
+            require(label.isNotEmpty()) {
+                if (negated) "IF_NOT_TIME_requires_label" else "IF_TIME_requires_label"
+            }
+            return WorkflowStep.IfCountdownVisible(label = label, negated = negated)
+        }
+
         private fun resolveControlFlow(steps: List<WorkflowStep>): List<WorkflowStep> {
             val labels = HashMap<String, Int>()
             val loopStack = ArrayList<Int>()
@@ -1054,6 +1082,8 @@ class WorkflowEngine(
                     is WorkflowStep.IfImageVisible -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.IfImageNotVisible -> step.destination = labels[step.label]
+                        ?: throw IllegalArgumentException("unknown_label:${step.label}")
+                    is WorkflowStep.IfCountdownVisible -> step.destination = labels[step.label]
                         ?: throw IllegalArgumentException("unknown_label:${step.label}")
                     is WorkflowStep.Break ->
                         step.endIndex = (steps[step.startIndex] as WorkflowStep.LoopStart).endIndex
