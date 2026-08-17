@@ -11,8 +11,8 @@ android {
         applicationId = "vn.banupham.tronangapp"
         minSdk = 29
         targetSdk = 35
-        versionCode = 26
-        versionName = "0.22.0"
+        versionCode = 27
+        versionName = "0.23.0"
     }
 
     val ciKeyStoreFile = providers.environmentVariable("TRONANGAPP_KEYSTORE_FILE").orNull

@@ -552,6 +552,9 @@ class GenericAccessibilityService : AccessibilityService() {
         ImageTargetRuntime.clearWatch()
     }
 
+    fun displaySizeForWorkflow(): Pair<Int, Int> =
+        resources.displayMetrics.widthPixels to resources.displayMetrics.heightPixels
+
     fun probeImage(target: String, callback: (Result<Boolean>) -> Unit): String? {
         if (AutomationMode.paused) return "automation_paused"
         if (!ScreenCaptureService.running) return "screen_capture_not_running"
