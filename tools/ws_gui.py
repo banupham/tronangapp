@@ -197,6 +197,7 @@ class TronangControlApp:
         self.closing = False
         self.sample_mode = False
         self.sample_drag = None
+        self.image_target_rows = {}
         self.saved_workflow_name_var = tk.StringVar()
         self.app_profile_var = tk.StringVar(value="Không tự mở ứng dụng")
         self.app_profile_targets = {}
@@ -631,6 +632,39 @@ class TronangControlApp:
             text="Bật rồi kéo chuột khoanh đối tượng trên một màn hình",
         ).pack(side=tk.LEFT)
 
+        target_box = ttk.LabelFrame(parent, text="Ảnh mẫu đã lưu", padding=5)
+        target_box.pack(fill=tk.X, pady=(0, 6))
+        target_actions = ttk.Frame(target_box)
+        target_actions.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
+        ttk.Button(target_actions, text="Tải danh sách", command=self.request_images).pack(fill=tk.X)
+        ttk.Button(
+            target_actions,
+            text="Chọn tất cả",
+            command=lambda: self.select_all_image_targets(True),
+        ).pack(fill=tk.X, pady=(3, 0))
+        ttk.Button(
+            target_actions,
+            text="Bỏ chọn",
+            command=lambda: self.select_all_image_targets(False),
+        ).pack(fill=tk.X, pady=(3, 0))
+        ttk.Button(target_actions, text="Xóa mục đã tích", command=self.remove_selected_images).pack(
+            fill=tk.X, pady=(3, 0)
+        )
+        self.image_target_tree = ttk.Treeview(
+            target_box,
+            columns=("selected", "device", "name"),
+            show="headings",
+            height=4,
+        )
+        self.image_target_tree.heading("selected", text="Xóa")
+        self.image_target_tree.heading("device", text="Thiết bị")
+        self.image_target_tree.heading("name", text="Tên ảnh mẫu")
+        self.image_target_tree.column("selected", width=48, minwidth=48, stretch=False, anchor=tk.CENTER)
+        self.image_target_tree.column("device", width=260, minwidth=140, stretch=True)
+        self.image_target_tree.column("name", width=220, minwidth=120, stretch=True)
+        self.image_target_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.image_target_tree.bind("<Button-1>", self.toggle_image_target)
+
         self.screen_grid = ttk.Frame(parent)
         self.screen_grid.pack(fill=tk.BOTH, expand=True)
         self.screen_grid.columnconfigure(0, weight=1)
@@ -958,7 +992,42 @@ class TronangControlApp:
         self.backend.send(json.dumps({"cmd": "capture_status"}), self._selected_clients())
 
     def request_images(self):
-        self.backend.send(json.dumps({"cmd": "image_list"}), self._selected_clients())
+        targets = self._selected_clients()
+        self.image_target_rows.clear()
+        self.image_target_tree.delete(*self.image_target_tree.get_children())
+        self.backend.send(json.dumps({"cmd": "image_list"}), targets)
+
+    def toggle_image_target(self, event):
+        if self.image_target_tree.identify_column(event.x) != "#1":
+            return
+        item = self.image_target_tree.identify_row(event.y)
+        if not item:
+            return
+        values = self.image_target_tree.item(item, "values")
+        selected = values[0] != "☑"
+        self.image_target_tree.set(item, "selected", "☑" if selected else "☐")
+        for key, row in self.image_target_rows.items():
+            if row["item"] == item:
+                row["selected"] = selected
+                break
+
+    def select_all_image_targets(self, selected):
+        for row in self.image_target_rows.values():
+            row["selected"] = selected
+            self.image_target_tree.set(row["item"], "selected", "☑" if selected else "☐")
+
+    def remove_selected_images(self):
+        selected = [key for key, row in self.image_target_rows.items() if row["selected"]]
+        if not selected:
+            messagebox.showinfo("Xóa ảnh mẫu", "Chưa tích ảnh mẫu cần xóa")
+            return
+        if not messagebox.askyesno("Xóa ảnh mẫu", f"Xóa {len(selected)} ảnh mẫu đã tích?"):
+            return
+        for client_id, name in selected:
+            self.backend.send(
+                json.dumps({"cmd": "image_remove", "name": name}, ensure_ascii=False),
+                [client_id],
+            )
 
     def start_screen_stream(self):
         try:
@@ -1019,6 +1088,9 @@ class TronangControlApp:
             widget.destroy()
         self.device_vars.pop(client_id, None)
         self.device_labels.pop(client_id, None)
+        for key in [key for key in self.image_target_rows if key[0] == client_id]:
+            row = self.image_target_rows.pop(key)
+            self.image_target_tree.delete(row["item"])
         screen = self.screen_labels.pop(client_id, None)
         if screen:
             screen.master.destroy()
@@ -1115,6 +1187,19 @@ class TronangControlApp:
                     f"({obj.get('width')}x{obj.get('height')})"
                 )
             self._log(f"[{client_id}] IMAGE PUT: {json.dumps(obj, ensure_ascii=False)}")
+        elif message_type == "image_list":
+            self._show_image_targets(client_id, obj.get("targets", []))
+            self._log(
+                f"[{client_id}] IMAGE LIST: {len(obj.get('targets', []))} mẫu "
+                f"capture_running={obj.get('capture_running')}"
+            )
+        elif message_type == "image_remove":
+            name = str(obj.get("name", ""))
+            if obj.get("success"):
+                row = self.image_target_rows.pop((client_id, name), None)
+                if row is not None:
+                    self.image_target_tree.delete(row["item"])
+            self._log(f"[{client_id}] IMAGE REMOVE: {json.dumps(obj, ensure_ascii=False)}")
         elif message_type == "image_click_timing":
             active = self.active_image_requests.get(client_id)
             if active and active.get("request_id") == str(obj.get("request_id")):
@@ -1184,6 +1269,22 @@ class TronangControlApp:
             )
         else:
             self._log(f"[{client_id} • {label}] PHONE: {json.dumps(obj, ensure_ascii=False)}")
+
+    def _show_image_targets(self, client_id, targets):
+        label = self.device_labels.get(client_id, client_id)
+        for key in [key for key in self.image_target_rows if key[0] == client_id]:
+            row = self.image_target_rows.pop(key)
+            self.image_target_tree.delete(row["item"])
+        for name in sorted({str(value).strip() for value in targets if str(value).strip()}):
+            item = self.image_target_tree.insert(
+                "",
+                tk.END,
+                values=("☐", f"{client_id} • {label}", name),
+            )
+            self.image_target_rows[(client_id, name)] = {
+                "item": item,
+                "selected": False,
+            }
 
     def _show_app_profiles(self, client_id, apps):
         targets = {}
