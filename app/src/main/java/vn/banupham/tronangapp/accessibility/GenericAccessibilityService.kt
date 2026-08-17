@@ -439,11 +439,13 @@ class GenericAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return false
         val candidates = ArrayList<ClickCandidate>()
         collectClickCandidates(root, expected, candidates, depth = 0)
+        var gestureFallback: AccessibilityNodeInfo? = null
         for (candidate in candidates.sortedBy { it.priority }) {
             val target = clickableNode(candidate.node) ?: continue
+            if (gestureFallback == null) gestureFallback = target
             if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
         }
-        return false
+        return gestureFallback?.let(::tapNodeCenter) == true
     }
 
     private fun clickFromLiveIndex(expected: String): Boolean {
@@ -1316,6 +1318,23 @@ class GenericAccessibilityService : AccessibilityService() {
             current = current?.parent
         }
         return null
+    }
+
+    private fun tapNodeCenter(node: AccessibilityNodeInfo): Boolean {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.isEmpty) return false
+
+        val x = bounds.centerX().coerceIn(0, resources.displayMetrics.widthPixels - 1)
+        val y = bounds.centerY().coerceIn(0, resources.displayMetrics.heightPixels - 1)
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        return dispatchGesture(
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, TAP_DURATION_MS))
+                .build(),
+            null,
+            null
+        )
     }
 
     override fun onInterrupt() {
