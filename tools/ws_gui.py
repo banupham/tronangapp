@@ -210,6 +210,7 @@ class TronangControlApp:
         self.app_profile_targets = {}
         self.saved_workflow_rows = {}
         self.command_guide_filter_var = tk.StringVar()
+        self.command_suggestion_var = tk.StringVar()
         self.plan_name_var = tk.StringVar()
         self.plan_schedule_type_var = tk.StringVar(value="daily")
         self.plan_schedule_value_var = tk.StringVar(value="08:00")
@@ -377,6 +378,21 @@ class TronangControlApp:
             text="Mẫu LOOP/IF",
             command=self.insert_loop_example,
         ).pack(side=tk.LEFT, padx=5)
+        ttk.Label(workflow_buttons, text="Gợi ý lệnh").pack(side=tk.LEFT, padx=(14, 4))
+        self.command_suggestion_combo = ttk.Combobox(
+            workflow_buttons,
+            textvariable=self.command_suggestion_var,
+            values=tuple(item[1] for item in COMMAND_GUIDE),
+            width=34,
+        )
+        self.command_suggestion_combo.pack(side=tk.LEFT)
+        self.command_suggestion_combo.bind("<KeyRelease>", self._filter_command_suggestions)
+        self.command_suggestion_combo.bind("<Return>", lambda _event: self._insert_command_suggestion())
+        ttk.Button(
+            workflow_buttons,
+            text="Chèn",
+            command=self._insert_command_suggestion,
+        ).pack(side=tk.LEFT, padx=(4, 0))
 
         raw_frame = ttk.LabelFrame(parent, text="Gửi JSON/text thô", padding=8)
         raw_frame.pack(fill=tk.X, pady=(8, 0))
@@ -485,6 +501,25 @@ class TronangControlApp:
     def _clear_command_guide_filter(self):
         self.command_guide_filter_var.set("")
         self._refresh_command_guide()
+
+    def _filter_command_suggestions(self, _event=None):
+        query = self.command_suggestion_var.get().strip().casefold()
+        values = tuple(
+            syntax
+            for command, syntax, description in COMMAND_GUIDE
+            if not query or query in f"{command} {syntax} {description}".casefold()
+        )
+        self.command_suggestion_combo["values"] = values
+
+    def _insert_command_suggestion(self):
+        syntax = self.command_suggestion_var.get().strip()
+        if not syntax:
+            messagebox.showinfo("Gợi ý lệnh", "Hãy chọn hoặc nhập cú pháp cần chèn")
+            return
+        current = self.workflow_text.get("1.0", tk.END).strip()
+        self.workflow_text.delete("1.0", tk.END)
+        self.workflow_text.insert("1.0", f"{current};{syntax}" if current else syntax)
+        self.workflow_text.see(tk.END)
 
     def _selected_guide_syntax(self):
         selected = self.command_guide_tree.selection()
