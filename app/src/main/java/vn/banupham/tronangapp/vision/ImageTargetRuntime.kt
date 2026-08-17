@@ -34,6 +34,7 @@ object ImageTargetRuntime {
         val width: Int,
         val height: Int,
         val samples: List<Sample>,
+        val verificationSamples: List<Sample>,
         val roiLeft: Int,
         val roiTop: Int,
         val roiRight: Int,
@@ -127,7 +128,10 @@ object ImageTargetRuntime {
 
         try {
             require(bitmap.width > 0 && bitmap.height > 0) { "invalid_template_size" }
-            val samples = buildSamples(bitmap.width, bitmap.height) { x, y -> bitmap.getPixel(x, y) }
+            val pixelAt = { x: Int, y: Int -> bitmap.getPixel(x, y) }
+            val baseSamples = buildSamples(bitmap.width, bitmap.height, pixelAt)
+            val verificationSamples = buildVerificationSamples(bitmap.width, bitmap.height, pixelAt)
+            val samples = buildSearchSamples(baseSamples, verificationSamples)
             require(samples.isNotEmpty()) { "image_has_no_usable_pixels" }
             val safeThreshold = if (threshold.isFinite()) threshold.coerceIn(0.50, 0.999) else 0.90
 
@@ -136,6 +140,7 @@ object ImageTargetRuntime {
                 width = bitmap.width,
                 height = bitmap.height,
                 samples = samples,
+                verificationSamples = verificationSamples,
                 roiLeft = roiLeft,
                 roiTop = roiTop,
                 roiRight = roiRight,
@@ -182,7 +187,7 @@ object ImageTargetRuntime {
         val buffer = plane.buffer
         val templateWidth = templateRight - templateLeft
         val templateHeight = templateBottom - templateTop
-        val samples = buildSamples(templateWidth, templateHeight) { x, y ->
+        val pixelAt = { x: Int, y: Int ->
             val offset = (templateTop + y) * plane.rowStride +
                 (templateLeft + x) * plane.pixelStride
             require(offset >= 0 && offset + 2 < buffer.limit()) { "image_sample_out_of_bounds" }
@@ -192,6 +197,9 @@ object ImageTargetRuntime {
                 buffer.get(offset + 2).toInt() and 0xFF
             )
         }
+        val baseSamples = buildSamples(templateWidth, templateHeight, pixelAt)
+        val verificationSamples = buildVerificationSamples(templateWidth, templateHeight, pixelAt)
+        val samples = buildSearchSamples(baseSamples, verificationSamples)
         require(samples.isNotEmpty()) { "image_has_no_usable_pixels" }
         val safeThreshold = if (threshold.isFinite()) threshold.coerceIn(0.50, 0.999) else 0.90
         val target = ImageTarget(
@@ -199,6 +207,7 @@ object ImageTargetRuntime {
             width = templateWidth,
             height = templateHeight,
             samples = samples,
+            verificationSamples = verificationSamples,
             roiLeft = roiLeft.coerceIn(0, screenWidth),
             roiTop = roiTop.coerceIn(0, screenHeight),
             roiRight = roiRight.coerceIn(0, screenWidth),
@@ -389,7 +398,9 @@ object ImageTargetRuntime {
         }
 
         if (bestDiff > allowedDiff) return null
-        return buildMatch(target, bestX, bestY, bestDiff, maxDiff)
+        return buildVerifiedMatch(
+            buffer, rowStride, pixelStride, target, bestX, bestY, bestDiff, maxDiff
+        )
     }
 
     private fun findNearHint(
@@ -419,7 +430,10 @@ object ImageTargetRuntime {
                 abortAbove = allowedDiff
             )
             if (directDiff <= allowedDiff) {
-                return buildMatch(target, hintX, hintY, directDiff, maxDiff)
+                val match = buildVerifiedMatch(
+                    buffer, rowStride, pixelStride, target, hintX, hintY, directDiff, maxDiff
+                )
+                if (match != null) return match
             }
         }
 
@@ -461,17 +475,48 @@ object ImageTargetRuntime {
         }
 
         if (bestX < 0 || bestDiff > allowedDiff) return null
-        return buildMatch(target, bestX, bestY, bestDiff, maxDiff)
+        return buildVerifiedMatch(
+            buffer, rowStride, pixelStride, target, bestX, bestY, bestDiff, maxDiff
+        )
+    }
+
+    private fun buildVerifiedMatch(
+        buffer: java.nio.ByteBuffer,
+        rowStride: Int,
+        pixelStride: Int,
+        target: ImageTarget,
+        x: Int,
+        y: Int,
+        coarseDiff: Long,
+        coarseMaxDiff: Long
+    ): ImageMatch? {
+        var score = 1.0 - (coarseDiff.toDouble() / coarseMaxDiff.toDouble())
+        if (target.verificationSamples.isNotEmpty()) {
+            val verificationMaxDiff = target.verificationSamples.size.toLong() * 3L * 255L
+            val allowedVerificationDiff = (
+                (1.0 - max(target.threshold, MIN_VERIFICATION_THRESHOLD)) * verificationMaxDiff
+            ).toLong().coerceAtLeast(1L)
+            val verificationDiff = sampleDifference(
+                buffer = buffer,
+                rowStride = rowStride,
+                pixelStride = pixelStride,
+                originX = x,
+                originY = y,
+                samples = target.verificationSamples,
+                abortAbove = allowedVerificationDiff
+            )
+            if (verificationDiff > allowedVerificationDiff) return null
+            score = min(score, 1.0 - verificationDiff.toDouble() / verificationMaxDiff.toDouble())
+        }
+        return buildMatch(target, x, y, score)
     }
 
     private fun buildMatch(
         target: ImageTarget,
         x: Int,
         y: Int,
-        diff: Long,
-        maxDiff: Long
+        score: Double
     ): ImageMatch {
-        val score = 1.0 - (diff.toDouble() / maxDiff.toDouble())
         return ImageMatch(
             name = target.name,
             left = x,
@@ -540,6 +585,81 @@ object ImageTargetRuntime {
         return result
     }
 
+    /**
+     * Select pixels that differ most from the template's average color. This
+     * makes text and icons carry most of the verification score instead of a
+     * large flat background. These samples are checked only after the fast
+     * 8x8 scan has found a candidate position.
+     */
+    private fun buildVerificationSamples(
+        width: Int,
+        height: Int,
+        pixelAt: (Int, Int) -> Int
+    ): List<Sample> {
+        val candidates = ArrayList<Sample>()
+        val gridX = min(VERIFICATION_GRID, width)
+        val gridY = min(VERIFICATION_GRID, height)
+        for (gy in 0 until gridY) {
+            val y = if (gridY == 1) 0 else gy * (height - 1) / (gridY - 1)
+            for (gx in 0 until gridX) {
+                val x = if (gridX == 1) 0 else gx * (width - 1) / (gridX - 1)
+                val color = pixelAt(x, y)
+                if (Color.alpha(color) < 32) continue
+                candidates += Sample(
+                    x = x,
+                    y = y,
+                    red = Color.red(color),
+                    green = Color.green(color),
+                    blue = Color.blue(color)
+                )
+            }
+        }
+        if (candidates.isEmpty()) return emptyList()
+
+        val meanRed = candidates.sumOf { it.red }.toDouble() / candidates.size
+        val meanGreen = candidates.sumOf { it.green }.toDouble() / candidates.size
+        val meanBlue = candidates.sumOf { it.blue }.toDouble() / candidates.size
+        val ranked = candidates.map { sample ->
+            val distance = kotlin.math.abs(sample.red - meanRed) +
+                kotlin.math.abs(sample.green - meanGreen) +
+                kotlin.math.abs(sample.blue - meanBlue)
+            sample to distance
+        }.sortedByDescending { it.second }
+
+        val strongest = ranked.first().second
+        val cutoff = max(MIN_DISTINCTIVE_DISTANCE, strongest * DISTINCTIVE_RATIO)
+        val distinctive = ranked.asSequence()
+            .filter { it.second >= cutoff }
+            .map { it.first }
+            .take(MAX_VERIFICATION_SAMPLES)
+            .toMutableList()
+        if (distinctive.size < min(MIN_VERIFICATION_SAMPLES, ranked.size)) {
+            ranked.asSequence()
+                .map { it.first }
+                .filterNot { it in distinctive }
+                .take(min(MIN_VERIFICATION_SAMPLES, ranked.size) - distinctive.size)
+                .forEach(distinctive::add)
+        }
+        return distinctive
+    }
+
+    private fun buildSearchSamples(
+        baseSamples: List<Sample>,
+        verificationSamples: List<Sample>
+    ): List<Sample> {
+        if (verificationSamples.isEmpty()) return baseSamples
+        val distinctive = verificationSamples.take(SEARCH_DISTINCTIVE_SAMPLES)
+        val distinctivePositions = distinctive.mapTo(HashSet()) { it.x to it.y }
+        val remaining = baseSamples.filterNot { (it.x to it.y) in distinctivePositions }
+        val baseLimit = (SAMPLE_GRID * SAMPLE_GRID - distinctive.size).coerceAtLeast(0)
+        val selectedBase = if (remaining.size <= baseLimit) {
+            remaining
+        } else {
+            List(baseLimit) { index -> remaining[index * remaining.size / baseLimit] }
+        }
+        return selectedBase + distinctive
+    }
+
     private fun persistTargets() {
         val prefs = preferences ?: return
         val serialized = JSONArray().apply {
@@ -555,6 +675,17 @@ object ImageTargetRuntime {
                     put("threshold", target.threshold)
                     put("samples", JSONArray().apply {
                         target.samples.forEach { sample ->
+                            put(JSONArray().apply {
+                                put(sample.x)
+                                put(sample.y)
+                                put(sample.red)
+                                put(sample.green)
+                                put(sample.blue)
+                            })
+                        }
+                    })
+                    put("verification_samples", JSONArray().apply {
+                        target.verificationSamples.forEach { sample ->
                             put(JSONArray().apply {
                                 put(sample.x)
                                 put(sample.y)
@@ -598,11 +729,30 @@ object ImageTargetRuntime {
                 }
                 val threshold = item.getDouble("threshold")
                 require(threshold.isFinite())
+                val storedVerificationSamples = item.optJSONArray("verification_samples")
+                val verificationSamples = ArrayList<Sample>()
+                if (storedVerificationSamples != null) {
+                    require(storedVerificationSamples.length() <= MAX_VERIFICATION_SAMPLES)
+                    for (sampleIndex in 0 until storedVerificationSamples.length()) {
+                        val values = storedVerificationSamples.getJSONArray(sampleIndex)
+                        val sample = Sample(
+                            x = values.getInt(0),
+                            y = values.getInt(1),
+                            red = values.getInt(2),
+                            green = values.getInt(3),
+                            blue = values.getInt(4)
+                        )
+                        require(sample.x in 0 until width && sample.y in 0 until height)
+                        require(sample.red in 0..255 && sample.green in 0..255 && sample.blue in 0..255)
+                        verificationSamples += sample
+                    }
+                }
                 val target = ImageTarget(
                     name = name,
                     width = width,
                     height = height,
                     samples = samples,
+                    verificationSamples = verificationSamples,
                     roiLeft = item.getInt("roi_left"),
                     roiTop = item.getInt("roi_top"),
                     roiRight = item.getInt("roi_right"),
@@ -617,6 +767,13 @@ object ImageTargetRuntime {
     private fun normalizeName(value: String): String = value.trim().lowercase(Locale.ROOT)
 
     private const val SAMPLE_GRID = 8
+    private const val VERIFICATION_GRID = 20
+    private const val SEARCH_DISTINCTIVE_SAMPLES = 16
+    private const val MIN_VERIFICATION_SAMPLES = 12
+    private const val MAX_VERIFICATION_SAMPLES = 96
+    private const val MIN_DISTINCTIVE_DISTANCE = 36.0
+    private const val DISTINCTIVE_RATIO = 0.25
+    private const val MIN_VERIFICATION_THRESHOLD = 0.90
     private const val COARSE_STRIDE = 2
     private const val HINT_RADIUS = 4
     private const val MAX_ENCODED_IMAGE_CHARS = 12 * 1024 * 1024
