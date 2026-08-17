@@ -5,6 +5,8 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.provider.Settings
 import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
@@ -41,7 +43,16 @@ class RemoteSocketClient(
     private var shouldReconnect = false
     private var reconnectDelayMs = 1_000L
     private var reconnectScheduled = false
+    private var lastDisconnectReason: String? = null
+    private var lastDisconnectedAtMs = 0L
     private val pendingMessages = ArrayDeque<String>()
+    private val deviceId: String by lazy {
+        Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
+            ?.lowercase()
+            ?.filter { it.isLetterOrDigit() }
+            ?.takeIf { it.isNotBlank() }
+            ?: "unknown"
+    }
 
     private val reconnectRunnable = Runnable {
         synchronized(this) {
@@ -128,7 +139,10 @@ class RemoteSocketClient(
     private fun openSocketLocked() {
         val target = url ?: return
         state = "connecting"
-        val request = Request.Builder().url(target).build()
+        val request = Request.Builder()
+            .url(target)
+            .header(DEVICE_ID_HEADER, deviceId)
+            .build()
         webSocket = client.newWebSocket(request, listener)
     }
 
@@ -198,7 +212,23 @@ class RemoteSocketClient(
                 reconnectDelayMs = 1_000L
                 reconnectScheduled = false
                 acquireWifiLockLocked()
-                webSocket.send("{\"type\":\"ready\",\"source\":\"tronangapp\"}")
+                val downtimeMs = if (lastDisconnectedAtMs > 0L) {
+                    SystemClock.elapsedRealtime() - lastDisconnectedAtMs
+                } else {
+                    0L
+                }
+                webSocket.send(org.json.JSONObject().apply {
+                    put("type", "ready")
+                    put("source", "tronangapp")
+                    put("device_id", deviceId)
+                    if (lastDisconnectReason != null) {
+                        put("reconnected", true)
+                        put("disconnect_reason", lastDisconnectReason)
+                        put("downtime_ms", downtimeMs)
+                    }
+                }.toString())
+                lastDisconnectReason = null
+                lastDisconnectedAtMs = 0L
                 flushPendingLocked(webSocket)
             }
         }
@@ -218,6 +248,8 @@ class RemoteSocketClient(
             synchronized(this@RemoteSocketClient) {
                 if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
+                lastDisconnectReason = "closed:$code:${reason.ifBlank { "no_reason" }}"
+                lastDisconnectedAtMs = SystemClock.elapsedRealtime()
                 this@RemoteSocketClient.webSocket = null
                 releaseWifiLockLocked()
                 scheduleReconnectLocked()
@@ -228,6 +260,13 @@ class RemoteSocketClient(
             synchronized(this@RemoteSocketClient) {
                 if (this@RemoteSocketClient.webSocket !== webSocket) return
                 state = "disconnected"
+                lastDisconnectReason = buildString {
+                    append("failure:")
+                    append(t.javaClass.simpleName)
+                    t.message?.takeIf { it.isNotBlank() }?.let { append(":").append(it) }
+                    response?.code?.let { append(":http_").append(it) }
+                }
+                lastDisconnectedAtMs = SystemClock.elapsedRealtime()
                 this@RemoteSocketClient.webSocket = null
                 releaseWifiLockLocked()
                 scheduleReconnectLocked()
@@ -257,5 +296,6 @@ class RemoteSocketClient(
         private const val MAX_TRANSIENT_QUEUE_BYTES = 128L * 1024L
         private const val SOCKET_PING_SECONDS = 5L
         private const val WIFI_LOCK_TAG = "tronangapp:realtime_socket"
+        private const val DEVICE_ID_HEADER = "X-Tronang-Device-Id"
     }
 }

@@ -94,10 +94,25 @@ class WebSocketBackend:
         self.events.put(("server_stopped",))
 
     async def _handler(self, ws):
-        client_id = f"phone-{next(self.client_ids)}"
+        headers = getattr(ws, "request_headers", None)
+        if headers is None:
+            headers = getattr(getattr(ws, "request", None), "headers", None)
+        raw_device_id = headers.get("X-Tronang-Device-Id") if headers else None
+        safe_device_id = "".join(
+            char for char in (raw_device_id or "").lower()
+            if char.isalnum() or char in "-_"
+        )[:32]
+        client_id = (
+            f"phone-{safe_device_id}"
+            if safe_device_id
+            else f"phone-{next(self.client_ids)}"
+        )
         remote = ws.remote_address
         remote_label = f"{remote[0]}:{remote[1]}" if remote else client_id
+        previous = self.clients.get(client_id)
         self.clients[client_id] = ws
+        if previous is not None and previous is not ws:
+            await previous.close(4001, "replaced_by_reconnect")
         self.events.put(("client_connected", client_id, remote_label))
         try:
             async for message in ws:
@@ -107,8 +122,14 @@ class WebSocketBackend:
                     payload = message
                 self.events.put(("message", client_id, payload))
         finally:
-            self.clients.pop(client_id, None)
-            self.events.put(("client_disconnected", client_id))
+            if self.clients.get(client_id) is ws:
+                self.clients.pop(client_id, None)
+                self.events.put((
+                    "client_disconnected",
+                    client_id,
+                    getattr(ws, "close_code", None),
+                    getattr(ws, "close_reason", None),
+                ))
 
     async def _broadcast(self, message, target_ids):
         if not self.clients:
@@ -975,6 +996,10 @@ class TronangControlApp:
 
     def _add_device(self, client_id, label):
         if client_id in self.device_vars:
+            self.device_labels[client_id] = label
+            widget = self.device_widgets.get(client_id)
+            if widget is not None:
+                widget.configure(text=f"{client_id} • {label}")
             return
         value = tk.BooleanVar(value=True)
         widget = ttk.Checkbutton(
@@ -1052,7 +1077,12 @@ class TronangControlApp:
         elif kind == "client_disconnected":
             label = self.device_labels.get(event[1], event[1])
             self._remove_device(event[1])
-            self._log(f"DISCONNECTED {event[1]} • {label}")
+            details = ""
+            if len(event) > 2 and event[2] is not None:
+                details += f" code={event[2]}"
+            if len(event) > 3 and event[3]:
+                details += f" reason={event[3]}"
+            self._log(f"DISCONNECTED {event[1]} • {label}{details}")
         elif kind == "send_error":
             self._log(f"SEND ERROR: {event[1]}")
         elif kind == "message":
