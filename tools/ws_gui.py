@@ -368,6 +368,21 @@ class TronangControlApp:
         self.workflow_text = tk.Text(workflow_frame, height=12, wrap=tk.WORD, undo=True)
         self.workflow_text.pack(fill=tk.BOTH, expand=True)
         self.workflow_text.insert("1.0", "WAIT:Trợ năng App;SLEEP:0")
+        self.workflow_suggestion_list = tk.Listbox(
+            workflow_frame,
+            height=7,
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        self.workflow_suggestion_start = None
+        self.workflow_text.bind("<KeyRelease>", self._show_workflow_autocomplete, add="+")
+        self.workflow_text.bind("<Down>", self._autocomplete_move_down, add="+")
+        self.workflow_text.bind("<Up>", self._autocomplete_move_up, add="+")
+        self.workflow_text.bind("<Return>", self._autocomplete_accept, add="+")
+        self.workflow_text.bind("<Tab>", self._autocomplete_accept, add="+")
+        self.workflow_text.bind("<Escape>", self._autocomplete_hide, add="+")
+        self.workflow_suggestion_list.bind("<Double-1>", self._autocomplete_accept)
+        self.workflow_suggestion_list.bind("<ButtonRelease-1>", self._autocomplete_accept)
 
         workflow_buttons = ttk.Frame(workflow_frame)
         workflow_buttons.pack(fill=tk.X, pady=(8, 0))
@@ -510,6 +525,91 @@ class TronangControlApp:
             if not query or query in f"{command} {syntax} {description}".casefold()
         )
         self.command_suggestion_combo["values"] = values
+
+    def _show_workflow_autocomplete(self, event=None):
+        if event is not None and event.keysym in {"Up", "Down", "Return", "Tab", "Escape"}:
+            return
+        before_cursor = self.workflow_text.get("1.0", "insert")
+        separator = max(before_cursor.rfind(";"), before_cursor.rfind("\n"))
+        raw_token = before_cursor[separator + 1:]
+        query = raw_token.strip()
+        if not query or ":" in query or any(char.isspace() for char in query):
+            self._autocomplete_hide()
+            return
+        normalized = query.casefold()
+        matches = [
+            syntax
+            for command, syntax, _description in COMMAND_GUIDE
+            if command.casefold().startswith(normalized) or syntax.casefold().startswith(normalized)
+        ]
+        if not matches:
+            self._autocomplete_hide()
+            return
+
+        self.workflow_suggestion_list.delete(0, tk.END)
+        for syntax in matches[:12]:
+            self.workflow_suggestion_list.insert(tk.END, syntax)
+        self.workflow_suggestion_list.selection_set(0)
+        self.workflow_suggestion_list.activate(0)
+        self.workflow_suggestion_start = self.workflow_text.index(
+            f"insert - {len(raw_token)} chars"
+        )
+        bbox = self.workflow_text.bbox("insert")
+        if bbox is None:
+            self._autocomplete_hide()
+            return
+        x, y, _width, height = bbox
+        popup_width = min(430, max(240, self.workflow_text.winfo_width() - x - 8))
+        self.workflow_suggestion_list.place(
+            x=x,
+            y=y + height,
+            width=popup_width,
+        )
+        self.workflow_suggestion_list.lift()
+
+    def _autocomplete_visible(self):
+        return bool(self.workflow_suggestion_list.winfo_manager())
+
+    def _autocomplete_move_down(self, _event=None):
+        if not self._autocomplete_visible():
+            return None
+        current = self.workflow_suggestion_list.curselection()
+        index = min((current[0] if current else -1) + 1, self.workflow_suggestion_list.size() - 1)
+        self.workflow_suggestion_list.selection_clear(0, tk.END)
+        self.workflow_suggestion_list.selection_set(index)
+        self.workflow_suggestion_list.activate(index)
+        self.workflow_suggestion_list.see(index)
+        return "break"
+
+    def _autocomplete_move_up(self, _event=None):
+        if not self._autocomplete_visible():
+            return None
+        current = self.workflow_suggestion_list.curselection()
+        index = max((current[0] if current else 1) - 1, 0)
+        self.workflow_suggestion_list.selection_clear(0, tk.END)
+        self.workflow_suggestion_list.selection_set(index)
+        self.workflow_suggestion_list.activate(index)
+        self.workflow_suggestion_list.see(index)
+        return "break"
+
+    def _autocomplete_accept(self, _event=None):
+        if not self._autocomplete_visible() or self.workflow_suggestion_start is None:
+            return None
+        selected = self.workflow_suggestion_list.curselection()
+        if not selected:
+            return "break"
+        syntax = self.workflow_suggestion_list.get(selected[0])
+        self.workflow_text.delete(self.workflow_suggestion_start, "insert")
+        self.workflow_text.insert(self.workflow_suggestion_start, syntax)
+        self.workflow_text.mark_set("insert", f"{self.workflow_suggestion_start} + {len(syntax)} chars")
+        self._autocomplete_hide()
+        self.workflow_text.focus_set()
+        return "break"
+
+    def _autocomplete_hide(self, _event=None):
+        self.workflow_suggestion_list.place_forget()
+        self.workflow_suggestion_start = None
+        return "break" if _event is not None else None
 
     def _insert_command_suggestion(self):
         syntax = self.command_suggestion_var.get().strip()
