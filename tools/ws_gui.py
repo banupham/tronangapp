@@ -535,7 +535,7 @@ class TronangControlApp:
             editor,
             text="once: YYYY-MM-DD HH:MM  •  daily: HH:MM  •  manual: không dùng thời gian",
         ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 4))
-        self.plan_items_text = tk.Text(editor, height=6, wrap=tk.NONE, undo=True)
+        self.plan_items_text = tk.Text(editor, height=4, wrap=tk.NONE, undo=True)
         self.plan_items_text.grid(row=2, column=0, columnspan=7, sticky="ew")
 
         buttons = ttk.Frame(editor)
@@ -543,6 +543,13 @@ class TronangControlApp:
         ttk.Button(buttons, text="Thêm workflow đang chọn", command=self.add_selected_workflow_to_plan).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Lưu / ghi đè kế hoạch", command=self.save_automation_plan).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Làm mới", command=self.request_automation_plans).pack(side=tk.LEFT)
+
+        actions = ttk.Frame(parent)
+        actions.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(actions, text="Nạp để sửa", command=self.load_automation_plan).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Chạy ngay", command=self.run_automation_plan).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Bật / tắt", command=self.toggle_automation_plan).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Xoá kế hoạch", command=self.remove_automation_plan).pack(side=tk.LEFT, padx=5)
 
         columns = ("name", "items", "schedule", "enabled")
         tree_frame = ttk.Frame(parent)
@@ -559,13 +566,6 @@ class TronangControlApp:
         self.automation_plan_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.automation_plan_tree.bind("<Double-1>", lambda _event: self.load_automation_plan())
-
-        actions = ttk.Frame(parent)
-        actions.pack(fill=tk.X)
-        ttk.Button(actions, text="Nạp để sửa", command=self.load_automation_plan).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Chạy ngay", command=self.run_automation_plan).pack(side=tk.LEFT, padx=5)
-        ttk.Button(actions, text="Bật / tắt", command=self.toggle_automation_plan).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Xoá kế hoạch", command=self.remove_automation_plan).pack(side=tk.LEFT, padx=5)
 
     def _build_nodes_tab(self, parent):
         filters = ttk.Frame(parent)
