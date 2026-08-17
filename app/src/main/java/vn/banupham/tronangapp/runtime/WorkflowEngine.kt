@@ -26,6 +26,11 @@ sealed class WorkflowStep {
     data class Wait(val target: String) : WorkflowStep()
     data class Sleep(val seconds: Double) : WorkflowStep()
     data class RandomSleep(val minSeconds: Double, val maxSeconds: Double) : WorkflowStep()
+    data class WaitCountdown(
+        val minExtraSeconds: Double,
+        val maxExtraSeconds: Double,
+        val random: Boolean
+    ) : WorkflowStep()
     data class WaitImage(val target: String) : WorkflowStep()
     data class ClickImage(val target: String) : WorkflowStep()
     data class OpenApp(val packageName: String, val profileSerial: Long?) : WorkflowStep()
@@ -377,6 +382,11 @@ class WorkflowEngine(
                     return
                 }
 
+                is WorkflowStep.WaitCountdown -> {
+                    startCountdownSleepLocked(step)
+                    return
+                }
+
                 is WorkflowStep.WaitImage -> {
                     startImageWaitLocked(step.target, step)
                     return
@@ -568,6 +578,39 @@ class WorkflowEngine(
         }
     }
 
+    private fun startCountdownSleepLocked(step: WorkflowStep.WaitCountdown) {
+        val value = DynamicAccessibilityClick.findMatchingDescription(
+            service = service,
+            className = null,
+            descriptionRegex = Regex(COUNTDOWN_DESCRIPTION_REGEX)
+        )
+        if (value == null) {
+            failLocked("countdown_not_found", step)
+            return
+        }
+        val parts = value.split(':')
+        val minutes = parts.getOrNull(0)?.toLongOrNull()
+        val seconds = parts.getOrNull(1)?.toLongOrNull()
+        if (minutes == null || seconds == null || seconds !in 0L..59L) {
+            failLocked("countdown_invalid", step)
+            return
+        }
+        val extraSeconds = if (step.minExtraSeconds == step.maxExtraSeconds) {
+            step.minExtraSeconds
+        } else {
+            Random.nextDouble(step.minExtraSeconds, step.maxExtraSeconds)
+        }
+        val delayMs = ((minutes * 60.0 + seconds + extraSeconds) * 1_000.0)
+            .toLong()
+            .coerceAtLeast(0L)
+        actionInFlight = true
+        val token = executionId
+        setStatus(statusFor("sleeping", step))
+        service.delayForWorkflow(delayMs) {
+            onAsyncActionFinished(token, true, step, "countdown_sleep_cancelled")
+        }
+    }
+
     private fun startImageConditionalLocked(
         target: String,
         destination: Int,
@@ -692,6 +735,7 @@ class WorkflowEngine(
         is WorkflowStep.Wait -> "WAIT"
         is WorkflowStep.Sleep -> "SLEEP"
         is WorkflowStep.RandomSleep -> "SLEEP_RANDOM"
+        is WorkflowStep.WaitCountdown -> if (step.random) "WAIT_TIME_RANDOM" else "WAIT_TIME"
         is WorkflowStep.WaitImage -> "WAIT_IMG"
         is WorkflowStep.ClickImage -> "CLICK_IMG"
         is WorkflowStep.OpenApp -> "OPEN_APP"
@@ -725,6 +769,8 @@ class WorkflowEngine(
         is WorkflowStep.Wait -> step.target
         is WorkflowStep.Sleep -> step.seconds.toString()
         is WorkflowStep.RandomSleep -> "${step.minSeconds},${step.maxSeconds}"
+        is WorkflowStep.WaitCountdown ->
+            if (step.random) "${step.minExtraSeconds},${step.maxExtraSeconds}" else null
         is WorkflowStep.WaitImage -> step.target
         is WorkflowStep.ClickImage -> step.target
         is WorkflowStep.OpenApp ->
@@ -904,6 +950,26 @@ class WorkflowEngine(
                                 maxSeconds <= MAX_SLEEP_SECONDS
                         ) { "SLEEP_RANDOM_range_out_of_bounds" }
                         WorkflowStep.RandomSleep(minSeconds, maxSeconds)
+                    }
+
+                    "WAIT_TIME" -> {
+                        require(argument.isEmpty()) { "WAIT_TIME_does_not_take_target" }
+                        WorkflowStep.WaitCountdown(0.0, 0.0, random = false)
+                    }
+
+                    "WAIT_TIME_RANDOM" -> {
+                        val parts = argument.replace('|', ',').split(',').map(String::trim)
+                        require(parts.size == 2) { "WAIT_TIME_RANDOM_requires_min_max_seconds" }
+                        val minSeconds = parts[0].toDoubleOrNull()
+                            ?: throw IllegalArgumentException("WAIT_TIME_RANDOM_invalid_min")
+                        val maxSeconds = parts[1].toDoubleOrNull()
+                            ?: throw IllegalArgumentException("WAIT_TIME_RANDOM_invalid_max")
+                        require(
+                            minSeconds.isFinite() && maxSeconds.isFinite() &&
+                                minSeconds >= 0.0 && maxSeconds >= minSeconds &&
+                                maxSeconds <= MAX_SLEEP_SECONDS
+                        ) { "WAIT_TIME_RANDOM_range_out_of_bounds" }
+                        WorkflowStep.WaitCountdown(minSeconds, maxSeconds, random = true)
                     }
 
                     "UP" -> {

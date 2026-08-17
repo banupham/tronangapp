@@ -96,9 +96,15 @@ object DynamicAccessibilityClick {
         service: GenericAccessibilityService,
         className: String?,
         descriptionRegex: Regex
-    ): Boolean {
-        val selector = parseSelector(className) ?: return false
-        val root = service.rootInActiveWindow ?: return false
+    ): Boolean = findMatchingDescription(service, className, descriptionRegex) != null
+
+    fun findMatchingDescription(
+        service: GenericAccessibilityService,
+        className: String?,
+        descriptionRegex: Regex
+    ): String? {
+        val selector = parseSelector(className) ?: return null
+        val root = service.rootInActiveWindow ?: return null
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var inspected = 0
@@ -112,13 +118,13 @@ object DynamicAccessibilityClick {
                 descriptionMatches(node, descriptionRegex) &&
                 roiMatches(node, selector.roi)
             ) {
-                return true
+                return node.contentDescription?.toString()?.trim()
             }
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let(queue::addLast)
             }
         }
-        return false
+        return null
     }
 
     private fun parseSelector(raw: String?): Selector? {

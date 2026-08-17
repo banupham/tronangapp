@@ -24,6 +24,8 @@ COMMAND_GUIDE = (
     ("CLICK_TIME", "CLICK_TIME", "Bấm mô tả dạng đồng hồ đếm ngược mm:ss."),
     ("IF_TIME", "IF_TIME:TEN_NHAN", "Nếu có mô tả đồng hồ mm:ss thì nhảy tới LABEL."),
     ("IF_NOT_TIME", "IF_NOT_TIME:TEN_NHAN", "Nếu không còn mô tả đồng hồ mm:ss thì nhảy tới LABEL."),
+    ("WAIT_TIME", "WAIT_TIME", "Đọc đồng hồ mm:ss và chờ đúng thời gian còn lại."),
+    ("WAIT_TIME_RANDOM", "WAIT_TIME_RANDOM:2,5", "Chờ thời gian trên đồng hồ rồi cộng ngẫu nhiên 2–5 giây."),
     ("CLICK_DESC_REGEX", "CLICK_DESC_REGEX:^Mở.*", "Bấm node có mô tả khớp biểu thức chính quy."),
     ("CLICK_CLASS_DESC_REGEX", "CLICK_CLASS_DESC_REGEX:android.widget.Button|^Mở.*", "Lọc theo class và regex mô tả."),
     ("TAP", "TAP:540,1200", "Bấm trực tiếp tại toạ độ x,y."),
@@ -204,6 +206,9 @@ class TronangControlApp:
         self.closing = False
         self.sample_mode = False
         self.sample_drag = None
+        self.search_roi_mode = False
+        self.search_roi_drag = None
+        self.search_rois = {}
         self.image_target_rows = {}
         self.saved_workflow_name_var = tk.StringVar()
         self.app_profile_var = tk.StringVar(value="Không tự mở ứng dụng")
@@ -239,6 +244,8 @@ class TronangControlApp:
         self.sample_threshold_var = tk.StringVar(value="0.90")
         self.sample_margin_var = tk.StringVar(value="120")
         self.sample_button_var = tk.StringVar(value="Tạo ảnh mẫu")
+        self.search_roi_button_var = tk.StringVar(value="Chọn vùng tìm")
+        self.search_roi_status_var = tk.StringVar(value="Vùng tìm: theo ROI ±px")
         self.stream_status_var = tk.StringVar(value="Chế độ xem đang tắt")
 
         self._build_ui()
@@ -788,9 +795,17 @@ class TronangControlApp:
             textvariable=self.sample_button_var,
             command=self.toggle_sample_mode,
         ).pack(side=tk.LEFT, padx=8)
+        ttk.Button(
+            samplebar,
+            textvariable=self.search_roi_button_var,
+            command=self.toggle_search_roi_mode,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(samplebar, text="Xóa vùng tìm", command=self.clear_search_roi).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
         ttk.Label(
             samplebar,
-            text="Bật rồi kéo chuột khoanh đối tượng trên một màn hình",
+            textvariable=self.search_roi_status_var,
         ).pack(side=tk.LEFT)
 
         target_box = ttk.LabelFrame(parent, text="Ảnh mẫu đã lưu", padding=5)
@@ -1258,6 +1273,7 @@ class TronangControlApp:
         self.screen_images.pop(client_id, None)
         self.screen_source_images.pop(client_id, None)
         self.screen_geometry.pop(client_id, None)
+        self.search_rois.pop(client_id, None)
         self._close_sample_zoom(client_id)
         with self.frame_lock:
             self.pending_frames.pop(client_id, None)
@@ -1780,6 +1796,9 @@ class TronangControlApp:
         mapped = self._zoom_point_to_source(client_id, event.x, event.y)
         if mapped is None:
             return
+        if self.search_roi_mode:
+            self.search_roi_drag = (client_id, "zoom", event.x, event.y)
+            return
         if not self.sample_mode:
             target_x, target_y, image_x, image_y = mapped
             self._log(f"[{client_id}] ZOOM CLICK ({image_x},{image_y}) -> TAP:{target_x},{target_y}")
@@ -1788,6 +1807,19 @@ class TronangControlApp:
         self.zoom_sample_drag = (client_id, event.x, event.y)
 
     def _zoom_pointer_drag(self, client_id, event):
+        if (
+            self.search_roi_mode and self.search_roi_drag and
+            self.search_roi_drag[:2] == (client_id, "zoom")
+        ):
+            canvas = self.zoom_canvases.get(client_id)
+            if canvas is not None:
+                _, _, start_x, start_y = self.search_roi_drag
+                canvas.delete("search_roi_selection")
+                canvas.create_rectangle(
+                    start_x, start_y, event.x, event.y,
+                    outline="#40a0ff", width=2, tags="search_roi_selection",
+                )
+            return
         if not self.sample_mode or not self.zoom_sample_drag or self.zoom_sample_drag[0] != client_id:
             return
         canvas = self.zoom_canvases.get(client_id)
@@ -1806,6 +1838,17 @@ class TronangControlApp:
         )
 
     def _zoom_pointer_up(self, client_id, event):
+        if (
+            self.search_roi_mode and self.search_roi_drag and
+            self.search_roi_drag[:2] == (client_id, "zoom")
+        ):
+            _, _, start_x, start_y = self.search_roi_drag
+            self.search_roi_drag = None
+            first = self._zoom_point_to_source(client_id, start_x, start_y)
+            second = self._zoom_point_to_source(client_id, event.x, event.y)
+            if first is not None and second is not None:
+                self._save_search_roi(client_id, first, second)
+            return
         if not self.sample_mode or not self.zoom_sample_drag or self.zoom_sample_drag[0] != client_id:
             return
         _, start_x, start_y = self.zoom_sample_drag
@@ -1832,6 +1875,10 @@ class TronangControlApp:
                 messagebox.showerror("Tạo ảnh mẫu", "Ngưỡng 0.50–0.999; ROI 0–5000 px")
                 return
         self.sample_mode = not self.sample_mode
+        if self.sample_mode:
+            self.search_roi_mode = False
+            self.search_roi_drag = None
+            self.search_roi_button_var.set("Chọn vùng tìm")
         self.sample_drag = None
         self.sample_button_var.set("Hủy tạo mẫu" if self.sample_mode else "Tạo ảnh mẫu")
         self.stream_status_var.set(
@@ -1844,7 +1891,42 @@ class TronangControlApp:
             widget.delete("sample_selection")
             widget.configure(cursor="crosshair" if self.sample_mode else "hand2")
 
+    def toggle_search_roi_mode(self):
+        self.search_roi_mode = not self.search_roi_mode
+        self.search_roi_drag = None
+        if self.search_roi_mode:
+            self.sample_mode = False
+            self.sample_drag = None
+            self.zoom_sample_drag = None
+            self.sample_button_var.set("Tạo ảnh mẫu")
+        self.search_roi_button_var.set(
+            "Hủy chọn vùng tìm" if self.search_roi_mode else "Chọn vùng tìm"
+        )
+        self.stream_status_var.set(
+            "Kéo khoanh vùng sẽ tìm ảnh" if self.search_roi_mode else "Đã hủy chọn vùng tìm"
+        )
+        for widget in list(self.screen_labels.values()) + list(self.zoom_canvases.values()):
+            widget.delete("search_roi_selection")
+            widget.configure(cursor="crosshair" if self.search_roi_mode else "hand2")
+
+    def clear_search_roi(self):
+        targets = self._selected_clients()
+        for client_id in targets:
+            self.search_rois.pop(client_id, None)
+        self.search_roi_mode = False
+        self.search_roi_drag = None
+        self.search_roi_button_var.set("Chọn vùng tìm")
+        self.search_roi_status_var.set("Vùng tìm: theo ROI ±px")
+        for widget in list(self.screen_labels.values()) + list(self.zoom_canvases.values()):
+            widget.delete("search_roi_selection")
+            widget.configure(cursor="hand2")
+        self._log(f"Đã xóa vùng tìm riêng cho {len(targets)} thiết bị")
+
     def _screen_pointer_down(self, client_id, event):
+        if self.search_roi_mode:
+            if self._screen_point_to_source(client_id, event.x, event.y) is not None:
+                self.search_roi_drag = (client_id, "main", event.x, event.y)
+            return
         if not self.sample_mode:
             self._click_screen(client_id, event)
             return
@@ -1853,6 +1935,18 @@ class TronangControlApp:
         self.sample_drag = (client_id, event.x, event.y)
 
     def _screen_pointer_drag(self, client_id, event):
+        if (
+            self.search_roi_mode and self.search_roi_drag and
+            self.search_roi_drag[:2] == (client_id, "main")
+        ):
+            widget = self.screen_labels[client_id]
+            _, _, start_x, start_y = self.search_roi_drag
+            widget.delete("search_roi_selection")
+            widget.create_rectangle(
+                start_x, start_y, event.x, event.y,
+                outline="#40a0ff", width=2, tags="search_roi_selection",
+            )
+            return
         if not self.sample_mode or not self.sample_drag or self.sample_drag[0] != client_id:
             return
         widget = self.screen_labels[client_id]
@@ -1869,6 +1963,17 @@ class TronangControlApp:
         )
 
     def _screen_pointer_up(self, client_id, event):
+        if (
+            self.search_roi_mode and self.search_roi_drag and
+            self.search_roi_drag[:2] == (client_id, "main")
+        ):
+            _, _, start_x, start_y = self.search_roi_drag
+            self.search_roi_drag = None
+            first = self._screen_point_to_source(client_id, start_x, start_y)
+            second = self._screen_point_to_source(client_id, event.x, event.y)
+            if first is not None and second is not None:
+                self._save_search_roi(client_id, first, second)
+            return
         if not self.sample_mode or not self.sample_drag or self.sample_drag[0] != client_id:
             return
         _, start_x, start_y = self.sample_drag
@@ -1889,22 +1994,39 @@ class TronangControlApp:
             return
         source_width, source_height, _, _ = self.screen_geometry[client_id]
         margin = int(self.sample_margin_var.get())
+        custom_roi = self.search_rois.get(client_id)
+        if custom_roi is not None:
+            roi_left, roi_top, roi_right, roi_bottom = custom_roi
+            if not (
+                roi_left <= left and roi_top <= top and
+                roi_right >= right and roi_bottom >= bottom
+            ):
+                messagebox.showerror(
+                    "Tạo ảnh mẫu",
+                    "Vùng tìm riêng phải bao quanh vùng ảnh mẫu.",
+                )
+                return
+        else:
+            roi_left = max(0, left - margin)
+            roi_top = max(0, top - margin)
+            roi_right = min(source_width, right + margin)
+            roi_bottom = min(source_height, bottom + margin)
         payload = {
             "cmd": "image_capture_put",
             "name": self.sample_name_var.get().strip(),
             "threshold": float(self.sample_threshold_var.get()),
             "template": {"left": left, "top": top, "right": right, "bottom": bottom},
             "roi": {
-                "left": max(0, left - margin),
-                "top": max(0, top - margin),
-                "right": min(source_width, right + margin),
-                "bottom": min(source_height, bottom + margin),
+                "left": roi_left,
+                "top": roi_top,
+                "right": roi_right,
+                "bottom": roi_bottom,
             },
         }
         self.backend.send(json.dumps(payload, ensure_ascii=False), [client_id])
         self._log(
             f"[{client_id}] CREATE IMAGE {payload['name']} template={left},{top},{right},{bottom} "
-            f"roi=±{margin}px threshold={payload['threshold']}"
+            f"roi={roi_left},{roi_top},{roi_right},{roi_bottom} threshold={payload['threshold']}"
         )
         self.sample_mode = False
         self.sample_button_var.set("Tạo ảnh mẫu")
@@ -1914,6 +2036,25 @@ class TronangControlApp:
             widget.configure(cursor="hand2")
         for widget in self.zoom_canvases.values():
             widget.delete("sample_selection")
+            widget.configure(cursor="hand2")
+
+    def _save_search_roi(self, client_id, first, second):
+        left, right = sorted((first[0], second[0]))
+        top, bottom = sorted((first[1], second[1]))
+        right += 1
+        bottom += 1
+        if right - left < 4 or bottom - top < 4:
+            messagebox.showerror("Vùng tìm ảnh", "Vùng tìm quá nhỏ")
+            return
+        self.search_rois[client_id] = (left, top, right, bottom)
+        self.search_roi_mode = False
+        self.search_roi_button_var.set("Chọn vùng tìm")
+        self.search_roi_status_var.set(
+            f"Vùng tìm {client_id}: {left},{top},{right},{bottom}"
+        )
+        self.stream_status_var.set(f"{client_id}: đã lưu vùng tìm ảnh")
+        for widget in list(self.screen_labels.values()) + list(self.zoom_canvases.values()):
+            widget.delete("search_roi_selection")
             widget.configure(cursor="hand2")
 
     def _handle_ack(self, client_id, obj):
