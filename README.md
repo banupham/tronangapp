@@ -1,5 +1,8 @@
 # Trợ năng App
 
+Tài liệu bàn giao đầy đủ cho phiên phát triển tiếp theo:
+[BAN_GIAO_CUOC_TRO_CHUYEN.md](BAN_GIAO_CUOC_TRO_CHUYEN.md)
+
 Android Accessibility agent tổng quát, không khóa cứng package, có cây UI/index RAM, WebSocket thường trực, workflow event-driven và tìm ảnh theo ROI ngay trên điện thoại.
 
 ## Bản 0.5.0
