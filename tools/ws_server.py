@@ -307,7 +307,14 @@ async def console():
 
 
 async def main():
-    async with websockets.serve(handler, HOST, PORT, max_size=32 * 1024 * 1024):
+    async with websockets.serve(
+        handler,
+        HOST,
+        PORT,
+        max_size=32 * 1024 * 1024,
+        ping_interval=None,
+        close_timeout=5,
+    ):
         print(f"WebSocket server: ws://{HOST}:{PORT}")
         await console()
 

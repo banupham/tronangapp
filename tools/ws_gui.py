@@ -103,6 +103,8 @@ class WebSocketBackend:
             host,
             port,
             max_size=32 * 1024 * 1024,
+            ping_interval=None,
+            close_timeout=5,
         ):
             self.events.put(("server_started", host, port))
             await self.stop_event.wait()

@@ -25,8 +25,9 @@ class RemoteSocketClient(
     private val connectionThread = HandlerThread("tronangapp-socket-control").apply { start() }
     private val handler = Handler(connectionThread.looper)
     private val client = OkHttpClient.Builder()
-        // A shorter WebSocket heartbeat keeps the TCP/Wi-Fi path warm for an
-        // interactive control channel instead of letting it sit idle for 20s.
+        // Hotspot links can occasionally delay a pong for several seconds.
+        // OkHttp uses the ping interval as the pong timeout too, so 5 seconds
+        // caused healthy sockets to reconnect after one delayed pong.
         .pingInterval(SOCKET_PING_SECONDS, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
@@ -306,7 +307,7 @@ class RemoteSocketClient(
         private const val KEY_URL = "url"
         private const val MAX_PENDING_MESSAGES = 200
         private const val MAX_TRANSIENT_QUEUE_BYTES = 128L * 1024L
-        private const val SOCKET_PING_SECONDS = 5L
+        private const val SOCKET_PING_SECONDS = 30L
         private const val WIFI_LOCK_TAG = "tronangapp:realtime_socket"
         private const val CPU_WAKE_LOCK_TAG = "tronangapp:socket-cpu"
         private const val DEVICE_ID_HEADER = "X-Tronang-Device-Id"
