@@ -4,7 +4,8 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import java.util.ArrayDeque
@@ -21,7 +22,8 @@ class RemoteSocketClient(
 ) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val handler = Handler(Looper.getMainLooper())
+    private val connectionThread = HandlerThread("tronangapp-socket-control").apply { start() }
+    private val handler = Handler(connectionThread.looper)
     private val client = OkHttpClient.Builder()
         // A shorter WebSocket heartbeat keeps the TCP/Wi-Fi path warm for an
         // interactive control channel instead of letting it sit idle for 20s.
@@ -30,6 +32,11 @@ class RemoteSocketClient(
         .build()
 
     private val wifiLock: WifiManager.WifiLock? = createRealtimeWifiLock()
+    private val cpuWakeLock: PowerManager.WakeLock? = runCatching {
+        (appContext.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, CPU_WAKE_LOCK_TAG)
+            .apply { setReferenceCounted(false) }
+    }.getOrNull()
 
     @Volatile
     var state: String = "disconnected"
@@ -112,6 +119,11 @@ class RemoteSocketClient(
         }
     }
 
+    fun shutdown() {
+        disconnect(clearSavedUrl = false)
+        connectionThread.quitSafely()
+    }
+
     /**
      * Send immediately when the socket is healthy. If the socket is between
      * connections, keep a bounded queue so ACK/completion messages are not
@@ -188,17 +200,17 @@ class RemoteSocketClient(
     }.getOrNull()
 
     private fun acquireWifiLockLocked() {
-        val lock = wifiLock ?: return
-        if (!lock.isHeld) {
-            runCatching { lock.acquire() }
+        wifiLock?.let { lock ->
+            if (!lock.isHeld) runCatching { lock.acquire() }
         }
+        cpuWakeLock?.takeUnless { it.isHeld }?.let { runCatching { it.acquire() } }
     }
 
     private fun releaseWifiLockLocked() {
-        val lock = wifiLock ?: return
-        if (lock.isHeld) {
-            runCatching { lock.release() }
+        wifiLock?.let { lock ->
+            if (lock.isHeld) runCatching { lock.release() }
         }
+        cpuWakeLock?.takeIf { it.isHeld }?.let { runCatching { it.release() } }
     }
 
     private val listener = object : WebSocketListener() {
@@ -296,6 +308,7 @@ class RemoteSocketClient(
         private const val MAX_TRANSIENT_QUEUE_BYTES = 128L * 1024L
         private const val SOCKET_PING_SECONDS = 5L
         private const val WIFI_LOCK_TAG = "tronangapp:realtime_socket"
+        private const val CPU_WAKE_LOCK_TAG = "tronangapp:socket-cpu"
         private const val DEVICE_ID_HEADER = "X-Tronang-Device-Id"
     }
 }

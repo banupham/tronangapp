@@ -57,6 +57,8 @@ class GenericAccessibilityService : AccessibilityService() {
     private val activePlanScripts = ArrayDeque<String>()
     private var activePlanName: String? = null
     private var activePlanStep = 0
+    private var activePlanCurrentScript: String? = null
+    private var activePlanCurrentRequestId: String? = null
 
     private var snapshotScheduled = false
     private var snapshotBurstStartedMs = 0L
@@ -124,7 +126,18 @@ class GenericAccessibilityService : AccessibilityService() {
         remoteSocket.connectSaved()
         refreshSnapshot("service_connected")
         mainHandler.postDelayed({ launchAutoCaptureRequest() }, AUTO_CAPTURE_LAUNCH_DELAY_MS)
-        if (!restoreWorkflowCheckpoint()) consumePendingAutomationPlans()
+        restorePlanExecution()
+        if (!restoreWorkflowCheckpoint()) {
+            if (activePlanName != null) {
+                if (activePlanCurrentScript != null) {
+                    workflowEngine.start(activePlanCurrentScript!!, activePlanCurrentRequestId)
+                } else {
+                    startNextAutomationPlanWorkflow()
+                }
+            } else {
+                consumePendingAutomationPlans()
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -657,6 +670,7 @@ class GenericAccessibilityService : AccessibilityService() {
             activePlanStep = 0
             activePlanScripts.clear()
             activePlanScripts.addAll(scripts)
+            persistPlanExecution()
             sendAutomationPlanState(plan.name, "running", null)
             startNextAutomationPlanWorkflow()
             return
@@ -679,13 +693,28 @@ class GenericAccessibilityService : AccessibilityService() {
             sendAutomationPlanState(name, "completed", null)
             activePlanName = null
             activePlanStep = 0
+            activePlanCurrentScript = null
+            activePlanCurrentRequestId = null
+            clearPlanExecution()
             maybeStartNextAutomationPlan()
             return
         }
         activePlanStep++
-        workflowEngine.start(
-            activePlanScripts.removeFirst(),
+        activePlanCurrentScript = activePlanScripts.removeFirst()
+        activePlanCurrentRequestId =
             "plan:${name}:${activePlanStep}:${SystemClock.elapsedRealtime()}"
+        persistPlanExecution()
+        remoteSocket.send(JSONObject().apply {
+            put("type", "automation_plan")
+            put("name", name)
+            put("state", "step_started")
+            put("step", activePlanStep)
+            put("remaining", activePlanScripts.size)
+            put("request_id", activePlanCurrentRequestId)
+        }.toString())
+        workflowEngine.start(
+            activePlanCurrentScript!!,
+            activePlanCurrentRequestId
         )
     }
 
@@ -696,10 +725,15 @@ class GenericAccessibilityService : AccessibilityService() {
         }
         if (!status.requestId.orEmpty().startsWith("plan:$name:")) return
         if (status.state == "completed") {
+            activePlanCurrentScript = null
+            activePlanCurrentRequestId = null
             startNextAutomationPlanWorkflow()
         } else {
             activePlanScripts.clear()
             activePlanName = null
+            activePlanCurrentScript = null
+            activePlanCurrentRequestId = null
+            clearPlanExecution()
             sendAutomationPlanState(name, "failed", status.error ?: status.state)
             maybeStartNextAutomationPlan()
         }
@@ -714,6 +748,37 @@ class GenericAccessibilityService : AccessibilityService() {
             put("remaining", activePlanScripts.size)
             put("error", error ?: JSONObject.NULL)
         }.toString())
+    }
+
+    private fun persistPlanExecution() {
+        val name = activePlanName ?: return
+        getSharedPreferences(PLAN_EXECUTION_PREFS, Context.MODE_PRIVATE).edit()
+            .putString(PLAN_EXECUTION_NAME, name)
+            .putInt(PLAN_EXECUTION_STEP, activePlanStep)
+            .putString(PLAN_EXECUTION_CURRENT_SCRIPT, activePlanCurrentScript)
+            .putString(PLAN_EXECUTION_REQUEST, activePlanCurrentRequestId)
+            .putString(PLAN_EXECUTION_REMAINING, JSONArray(activePlanScripts.toList()).toString())
+            .apply()
+    }
+
+    private fun restorePlanExecution() {
+        val prefs = getSharedPreferences(PLAN_EXECUTION_PREFS, Context.MODE_PRIVATE)
+        val name = prefs.getString(PLAN_EXECUTION_NAME, null)?.takeIf(String::isNotBlank) ?: return
+        activePlanName = name
+        activePlanStep = prefs.getInt(PLAN_EXECUTION_STEP, 0)
+        activePlanCurrentScript = prefs.getString(PLAN_EXECUTION_CURRENT_SCRIPT, null)
+        activePlanCurrentRequestId = prefs.getString(PLAN_EXECUTION_REQUEST, null)
+        activePlanScripts.clear()
+        runCatching { JSONArray(prefs.getString(PLAN_EXECUTION_REMAINING, "[]")) }
+            .getOrNull()?.let { array ->
+                for (index in 0 until array.length()) {
+                    array.optString(index).takeIf(String::isNotBlank)?.let(activePlanScripts::addLast)
+                }
+            }
+    }
+
+    private fun clearPlanExecution() {
+        getSharedPreferences(PLAN_EXECUTION_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
     fun connectSocket(url: String): Boolean = remoteSocket.connect(url, persist = true)
@@ -1400,7 +1465,7 @@ class GenericAccessibilityService : AccessibilityService() {
         ImageTargetRuntime.onMatch = null
         ImageTargetRuntime.clearWatch()
         backgroundExecutor.shutdownNow()
-        remoteSocket.disconnect(clearSavedUrl = false)
+        remoteSocket.shutdown()
         AgentRuntime.disconnect()
         super.onDestroy()
     }
@@ -1432,5 +1497,11 @@ class GenericAccessibilityService : AccessibilityService() {
         private const val CHECKPOINT_SCRIPT = "script"
         private const val CHECKPOINT_INDEX = "next_index"
         private const val CHECKPOINT_REQUEST = "request_id"
+        private const val PLAN_EXECUTION_PREFS = "automation_plan_execution"
+        private const val PLAN_EXECUTION_NAME = "name"
+        private const val PLAN_EXECUTION_STEP = "step"
+        private const val PLAN_EXECUTION_CURRENT_SCRIPT = "current_script"
+        private const val PLAN_EXECUTION_REQUEST = "request_id"
+        private const val PLAN_EXECUTION_REMAINING = "remaining_scripts"
     }
 }
